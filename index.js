@@ -2,57 +2,59 @@ import express from "express";
 import bodyParser from "body-parser";
 import axios from "axios";
 import dotenv from "dotenv";
+import mongoose from "mongoose";
+import User from "./models/User.js";
 
 dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 
-// ======================
-// CONFIG
-// ======================
-const VERIFY_TOKEN = "gluco_sahayak_verify";
+// ===============================
+// MongoDB Connection
+// ===============================
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-// In-memory user storage
-const userState = {};
+// ===============================
+// WhatsApp Config
+// ===============================
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// ======================
-// HELPERS
-// ======================
+// ===============================
+// Send WhatsApp Message
+// ===============================
 async function sendMessage(to, text) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         to,
-        type: "text",
-        text: { body: text }
+        text: { body: text },
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json",
+        },
       }
     );
-    console.log("✅ Message sent to", to);
+    console.log("📤 Message sent to", to);
   } catch (error) {
-    console.error("❌ Send error:", error.response?.data || error.message);
+    console.error("❌ Error sending message:", error.response?.data || error);
   }
 }
 
-function getTimestamp() {
-  return new Date().toLocaleString("en-IN", {
-    dateStyle: "short",
-    timeStyle: "short"
-  });
-}
-
-// ======================
-// WEBHOOK VERIFICATION
-// ======================
+// ===============================
+// Webhook Verification (GET)
+// ===============================
 app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -62,143 +64,95 @@ app.get("/webhook", (req, res) => {
     return res.status(200).send(challenge);
   }
 
-  return res.sendStatus(403);
+  res.sendStatus(403);
 });
 
-// ======================
-// RECEIVE MESSAGES
-// ======================
+// ===============================
+// Webhook Messages (POST)
+// ===============================
 app.post("/webhook", async (req, res) => {
-  const entry = req.body.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const value = changes?.value;
-  const message = value?.messages?.[0];
+  try {
+    const entry = req.body.entry?.[0];
+    const message = entry?.changes?.[0]?.value?.messages?.[0];
 
-  if (message && message.text) {
+    if (!message || message.type !== "text") {
+      return res.sendStatus(200);
+    }
+
     const from = message.from;
-    const rawText = message.text.body.trim();
-    const text = rawText.toUpperCase();
+    const text = message.text.body.trim().toUpperCase();
 
     console.log("📩 From:", from);
-    console.log("💬 Text:", rawText);
+    console.log("💬 Text:", text);
 
-    // Init user
-    if (!userState[from]) {
-      userState[from] = { step: "NEW", readings: [] };
+    // Find or create user
+    let user = await User.findOne({ phone: from });
+    if (!user) {
+      user = await User.create({ phone: from });
+      console.log("🆕 New user created:", from);
     }
 
-    const user = userState[from];
+    let reply = "";
 
-    // START
-    if (text === "START" && user.step === "NEW") {
-      user.step = "CONSENT";
-      await sendMessage(
-        from,
-        "Hi 👋 I’m *Gluco Sahayak*.\n\nI help you track blood sugar readings and reminders.\n\nDo you agree to share health-related data for tracking purposes?\n\nReply *YES* to continue or *NO* to exit."
-      );
+    // ===============================
+    // BOT LOGIC
+    // ===============================
+    if (user.state === "NEW") {
+      reply =
+        "👋 Welcome to *Gluco Sahayak*!\n\n" +
+        "I help you track sugar readings, reminders & healthy habits.\n\n" +
+        "Reply *YES* to get started.";
     }
 
-    // CONSENT YES
-    else if (text === "YES" && user.step === "CONSENT") {
-      user.step = "ACTIVE";
-      await sendMessage(
-        from,
-        "✅ Thank you.\n\nYou can now send readings like:\n\n• FASTING 110\n• PP 145\n• RANDOM 180\n\nType *HELP* anytime."
-      );
+    else if (text === "YES") {
+      user.state = "ACTIVE";
+      await user.save();
+
+      reply =
+        "✅ You’re all set!\n\n" +
+        "You can now:\n" +
+        "• Track sugar readings\n" +
+        "• Get reminders\n" +
+        "• Ask for help\n\n" +
+        "Type *HELP* anytime.";
     }
 
-    // CONSENT NO
-    else if (text === "NO" && user.step === "CONSENT") {
-      user.step = "EXITED";
-      await sendMessage(
-        from,
-        "No problem 👍\nIf you change your mind, type *START* anytime.\nTake care!"
-      );
+    else if (text === "HELP") {
+      reply =
+        "📖 *Gluco Sahayak Help*\n\n" +
+        "Commands:\n" +
+        "• YES – Activate bot\n" +
+        "• HELP – Show this menu\n\n" +
+        "More health features coming soon 💚";
     }
 
-    // HELP
-    else if (text === "HELP" && user.step === "ACTIVE") {
-      await sendMessage(
-        from,
-        "📋 *Gluco Sahayak Commands*\n\n• FASTING 110\n• PP 145\n• RANDOM 180\n• HISTORY\n• STOP"
-      );
-    }
-
-    // HISTORY
-    else if (text === "HISTORY" && user.step === "ACTIVE") {
-      if (user.readings.length === 0) {
-        await sendMessage(from, "No readings recorded yet.");
-      } else {
-        const last = user.readings
-          .slice(-5)
-          .map(r => `• ${r.type}: ${r.value} mg/dL (${r.time})`)
-          .join("\n");
-
-        await sendMessage(from, `📊 *Recent Readings*\n\n${last}`);
-      }
-    }
-
-    // STOP
-    else if (text === "STOP") {
-      user.step = "EXITED";
-      await sendMessage(
-        from,
-        "⏸️ Gluco Sahayak paused.\nType *START* anytime to resume."
-      );
-    }
-
-    // SUGAR PARSER
-    else if (user.step === "ACTIVE") {
-      const parts = text.split(" ");
-      const type = parts[0];
-      const value = Number(parts[1]);
-
-      if (
-        ["FASTING", "PP", "RANDOM"].includes(type) &&
-        !isNaN(value) &&
-        value > 20 &&
-        value < 600
-      ) {
-        user.readings.push({
-          type,
-          value,
-          time: getTimestamp()
-        });
-
-        await sendMessage(
-          from,
-          `✅ Noted your *${type}* sugar: *${value} mg/dL*.\n\nIf you feel unwell, please consult your doctor.`
-        );
-      } else {
-        await sendMessage(
-          from,
-          "❌ I couldn’t understand that.\n\nSend readings like:\nFASTING 110\nPP 145\nRANDOM 180"
-        );
-      }
-    }
-
-    // FALLBACK
     else {
-      await sendMessage(
-        from,
-        "Type *START* to begin or *HELP* for options."
-      );
+      reply =
+        "🤖 I got your message!\n\n" +
+        "Smart health tracking features are coming soon.\n\n" +
+        "Type *HELP* to see options.";
     }
+
+    await sendMessage(from, reply);
+    res.sendStatus(200);
+
+  } catch (error) {
+    console.error("❌ Webhook error:", error);
+    res.sendStatus(200);
   }
-
-  res.sendStatus(200);
 });
 
-// ======================
-// HEALTH CHECK
-// ======================
+// ===============================
+// Health Check
+// ===============================
 app.get("/", (req, res) => {
-  res.send("Gluco Sahayak Bot is running");
+  res.send("Gluco Sahayak Bot is running 🚀");
 });
 
-// ======================
-// START SERVER
-// ======================
-app.listen(3000, () => {
-  console.log("🚀 Server running on port 3000");
+// ===============================
+// Start Server
+// ===============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
