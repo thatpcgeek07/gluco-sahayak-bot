@@ -1,591 +1,499 @@
-// server.js - WhatsApp Business API Integration for Gluco-Sahayak
-// Deploy this on Render.com
-
 const express = require('express');
-const bodyParser = require('body-parser');
 const axios = require('axios');
-require('dotenv').config();
+const mongoose = require('mongoose');
+const cron = require('node-cron');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
+app.use(express.json());
+
+// Configuration
 const PORT = process.env.PORT || 3000;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE; // Doctor's WhatsApp number
 
-// Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// Environment variables - Set these in Render.com
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // Your WhatsApp API token
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // Webhook verification token
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; // Your WhatsApp phone number ID
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // Optional: For advanced NLP
-
-// In-memory database (Use PostgreSQL in production)
-const userDatabase = new Map();
-const glucoseReadings = new Map();
-
-// ============================================
-// WEBHOOK VERIFICATION (Required by WhatsApp)
-// ============================================
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('✅ Webhook verified');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);
-        }
-    }
+// MongoDB Schemas
+const patientSchema = new mongoose.Schema({
+  phone: { type: String, required: true, unique: true },
+  name: String,
+  age: Number,
+  diabetesType: String,
+  registeredAt: { type: Date, default: Date.now },
+  language: { type: String, default: 'en' },
+  medicationSchedule: [{
+    medicationName: String,
+    time: String,
+    frequency: String
+  }],
+  reminderPreferences: {
+    glucoseLogging: { type: Boolean, default: true },
+    medication: { type: Boolean, default: true },
+    preferredTimes: [String]
+  }
 });
 
-// ============================================
-// WEBHOOK - Receive Messages from WhatsApp
-// ============================================
-app.post('/webhook', async (req, res) => {
-    try {
-        const body = req.body;
-
-        // Check if message is from WhatsApp
-        if (body.object) {
-            if (body.entry && 
-                body.entry[0].changes && 
-                body.entry[0].changes[0] && 
-                body.entry[0].changes[0].value.messages && 
-                body.entry[0].changes[0].value.messages[0]
-            ) {
-                const message = body.entry[0].changes[0].value.messages[0];
-                const from = message.from; // User's phone number
-                const messageBody = message.text?.body || '';
-                const messageType = message.type; // text, audio, image, etc.
-
-                console.log(`📩 Message from ${from}: ${messageBody}`);
-
-                // Handle different message types
-                if (messageType === 'text') {
-                    await handleTextMessage(from, messageBody);
-                } else if (messageType === 'audio') {
-                    await handleVoiceMessage(from, message.audio);
-                } else if (messageType === 'interactive') {
-                    await handleInteractiveMessage(from, message.interactive);
-                }
-            }
-
-            res.sendStatus(200);
-        } else {
-            res.sendStatus(404);
-        }
-    } catch (error) {
-        console.error('❌ Webhook error:', error);
-        res.sendStatus(500);
-    }
+const glucoseReadingSchema = new mongoose.Schema({
+  patientPhone: { type: String, required: true },
+  reading: { type: Number, required: true },
+  readingType: { type: String, enum: ['fasting', 'postprandial', 'random'], required: true },
+  timestamp: { type: Date, default: Date.now },
+  symptoms: [String],
+  notes: String,
+  alertSent: { type: Boolean, default: false }
 });
 
-// ============================================
-// MESSAGE HANDLERS
-// ============================================
+const conversationSchema = new mongoose.Schema({
+  patientPhone: String,
+  messages: [{
+    role: String,
+    content: String,
+    timestamp: { type: Date, default: Date.now }
+  }],
+  lastActive: { type: Date, default: Date.now }
+});
 
-// Handle text messages
-async function handleTextMessage(phoneNumber, messageText) {
-    const lowerMsg = messageText.toLowerCase();
+const Patient = mongoose.model('Patient', patientSchema);
+const GlucoseReading = mongoose.model('GlucoseReading', glucoseReadingSchema);
+const Conversation = mongoose.model('Conversation', conversationSchema);
+
+// Connect to MongoDB
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// Medical Guidelines Constants (Based on CMR, IDF, WHO)
+const MEDICAL_THRESHOLDS = {
+  fasting: {
+    normal: { min: 70, max: 100 },
+    prediabetes: { min: 100, max: 125 },
+    diabetes: { min: 126, max: 300 },
+    critical_low: 70,
+    critical_high: 250
+  },
+  postprandial: {
+    normal: { min: 70, max: 140 },
+    prediabetes: { min: 140, max: 199 },
+    diabetes: { min: 200, max: 300 },
+    critical_low: 70,
+    critical_high: 300
+  },
+  random: {
+    critical_low: 70,
+    critical_high: 250
+  }
+};
+
+// System Prompt for Gemini AI
+const SYSTEM_PROMPT = `You are "Gluco Sahayak" (Glucose Helper), an AI assistant for diabetes management in India. 
+
+CORE RESPONSIBILITIES:
+1. Help patients log glucose readings and symptoms
+2. Provide evidence-based diet and lifestyle advice
+3. Identify dangerous trends and alert when necessary
+4. Support multiple Indian languages (Hindi, Tamil, Telugu, Bengali, etc.)
+5. Be empathetic, clear, and culturally sensitive
+
+MEDICAL KNOWLEDGE BASE:
+- Follow CMR Guidelines for Management of Type 2 Diabetes (2018)
+- Reference International Diabetes Federation (IDF) Atlas 2021 India Statistics
+- Adhere to WHO Global Report on Diabetes guidelines
+
+GUIDELINES:
+- Fasting glucose: Normal <100 mg/dL, Prediabetes 100-125, Diabetes ≥126
+- Postprandial (2hr): Normal <140 mg/dL, Prediabetes 140-199, Diabetes ≥200
+- Critical levels: <70 (hypoglycemia) or >250 (hyperglycemia) require immediate attention
+- HbA1c target: <7% for most adults with diabetes
+
+RESPONSE STYLE:
+- Be concise and practical
+- Suggest Indian diet options (roti, rice, dal, sabzi, etc.)
+- Recommend local exercises and lifestyle changes
+- Always clarify you're providing general guidance, not replacing doctor consultation
+- If critical values detected, strongly recommend immediate medical attention
+
+IMPORTANT: 
+- Never diagnose conditions
+- Always recommend consulting healthcare provider for treatment changes
+- Be supportive and non-judgmental
+- Extract and structure glucose data from user messages`;
+
+// Helper Functions
+async function sendWhatsAppMessage(to, message) {
+  try {
+    await axios({
+      method: 'POST',
+      url: `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`,
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      data: {
+        messaging_product: 'whatsapp',
+        to: to,
+        type: 'text',
+        text: { body: message }
+      }
+    });
+  } catch (error) {
+    console.error('Error sending WhatsApp message:', error.response?.data || error.message);
+  }
+}
+
+async function downloadWhatsAppMedia(mediaId) {
+  try {
+    // Get media URL
+    const mediaUrlResponse = await axios({
+      method: 'GET',
+      url: `https://graph.facebook.com/v18.0/${mediaId}`,
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`
+      }
+    });
+
+    const mediaUrl = mediaUrlResponse.data.url;
+
+    // Download media
+    const mediaResponse = await axios({
+      method: 'GET',
+      url: mediaUrl,
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`
+      },
+      responseType: 'arraybuffer'
+    });
+
+    return Buffer.from(mediaResponse.data);
+  } catch (error) {
+    console.error('Error downloading media:', error.message);
+    return null;
+  }
+}
+
+async function transcribeAudio(audioBuffer) {
+  // Using Gemini's audio capabilities
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     
-    // Initialize user if new
-    if (!userDatabase.has(phoneNumber)) {
-        await initializeUser(phoneNumber);
-        return;
-    }
-
-    const user = userDatabase.get(phoneNumber);
-
-    // Detect glucose reading
-    const glucoseMatch = messageText.match(/(\d{2,3})/);
-    if (glucoseMatch && (
-        lowerMsg.includes('sugar') || 
-        lowerMsg.includes('glucose') || 
-        lowerMsg.includes('शुगर') ||
-        lowerMsg.includes('ಸಕ್ಕರೆ') ||
-        lowerMsg.includes('చక్కెర')
-    )) {
-        await handleGlucoseReading(phoneNumber, parseInt(glucoseMatch[1]));
-    }
-    // Diet advice
-    else if (lowerMsg.includes('diet') || lowerMsg.includes('food') || lowerMsg.includes('खाना') || lowerMsg.includes('आहार')) {
-        await sendDietAdvice(phoneNumber, user.language);
-    }
-    // Symptoms
-    else if (lowerMsg.includes('symptom') || lowerMsg.includes('feeling') || lowerMsg.includes('लक्षण') || lowerMsg.includes('pain')) {
-        await analyzeSymptoms(phoneNumber, messageText, user.language);
-    }
-    // Medication
-    else if (lowerMsg.includes('medication') || lowerMsg.includes('medicine') || lowerMsg.includes('दवा')) {
-        await sendMedicationHelp(phoneNumber, user.language);
-    }
-    // Dashboard request
-    else if (lowerMsg.includes('dashboard') || lowerMsg.includes('report') || lowerMsg.includes('रिपोर्ट')) {
-        await sendHealthReport(phoneNumber, user.language);
-    }
-    // Language change
-    else if (lowerMsg.includes('hindi') || lowerMsg.includes('हिंदी')) {
-        await setLanguage(phoneNumber, 'hi');
-    } else if (lowerMsg.includes('english')) {
-        await setLanguage(phoneNumber, 'en');
-    } else if (lowerMsg.includes('kannada') || lowerMsg.includes('ಕನ್ನಡ')) {
-        await setLanguage(phoneNumber, 'kn');
-    } else if (lowerMsg.includes('telugu') || lowerMsg.includes('తెలుగు')) {
-        await setLanguage(phoneNumber, 'te');
-    }
-    // General help
-    else {
-        await sendGeneralHelp(phoneNumber, user.language);
-    }
-}
-
-// Handle voice messages
-async function handleVoiceMessage(phoneNumber, audioData) {
-    const user = userDatabase.get(phoneNumber);
-    
-    try {
-        // Download audio file
-        const audioUrl = await getMediaUrl(audioData.id);
-        
-        // TODO: Integrate with OpenAI Whisper for speech-to-text
-        // For now, send acknowledgment
-        await sendWhatsAppMessage(phoneNumber, {
-            type: 'text',
-            text: {
-                body: user.language === 'hi' 
-                    ? '🎤 आपका वॉइस मैसेज मिल गया। मैं इसे समझ रहा हूं...' 
-                    : '🎤 Voice message received. Processing...'
-            }
-        });
-
-        // Simulate speech-to-text (In production, use Whisper API)
-        setTimeout(async () => {
-            await sendWhatsAppMessage(phoneNumber, {
-                type: 'text',
-                text: {
-                    body: user.language === 'hi'
-                        ? 'कृपया टेक्स्ट में लिखें या फिर से कोशिश करें।'
-                        : 'Please type your message or try again.'
-                }
-            });
-        }, 2000);
-
-    } catch (error) {
-        console.error('Voice processing error:', error);
-        await sendWhatsAppMessage(phoneNumber, {
-            type: 'text',
-            text: { body: 'Sorry, could not process voice message. Please type instead.' }
-        });
-    }
-}
-
-// Handle interactive button responses
-async function handleInteractiveMessage(phoneNumber, interactive) {
-    const buttonId = interactive.button_reply?.id;
-    
-    switch(buttonId) {
-        case 'log_sugar':
-            await sendWhatsAppMessage(phoneNumber, {
-                type: 'text',
-                text: { body: 'Please tell me your blood sugar reading. Example: "My sugar is 120"' }
-            });
-            break;
-        case 'diet_advice':
-            await sendDietAdvice(phoneNumber, userDatabase.get(phoneNumber).language);
-            break;
-        case 'symptoms':
-            await sendWhatsAppMessage(phoneNumber, {
-                type: 'text',
-                text: { body: 'Please describe your symptoms. Example: "I have a headache"' }
-            });
-            break;
-        case 'medication':
-            await sendMedicationHelp(phoneNumber, userDatabase.get(phoneNumber).language);
-            break;
-        case 'dashboard':
-            await sendHealthReport(phoneNumber, userDatabase.get(phoneNumber).language);
-            break;
-    }
-}
-
-// ============================================
-// BUSINESS LOGIC FUNCTIONS
-// ============================================
-
-// Initialize new user
-async function initializeUser(phoneNumber) {
-    userDatabase.set(phoneNumber, {
-        phoneNumber,
-        language: 'en',
-        joinedAt: new Date(),
-        lastActive: new Date()
-    });
-
-    glucoseReadings.set(phoneNumber, []);
-
-    // Send welcome message with language selection
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: {
-            body: `🙏 Welcome to Gluco-Sahayak!\nनमस्ते! ग्लूको-सहायक में आपका स्वागत है!\n\nI'm your 24/7 diabetes health companion.\n\nPlease select your language:\n1. English\n2. हिन्दी (Hindi)\n3. ಕನ್ನಡ (Kannada)\n4. తెలుగు (Telugu)\n\nReply with the number or language name.`
-        }
-    });
-
-    // Send quick action buttons
-    setTimeout(() => sendQuickActions(phoneNumber), 2000);
-}
-
-// Handle glucose reading
-async function handleGlucoseReading(phoneNumber, value) {
-    const user = userDatabase.get(phoneNumber);
-    const readings = glucoseReadings.get(phoneNumber);
-    
-    // Save reading
-    readings.push({
-        value,
-        timestamp: new Date(),
-        type: 'manual'
-    });
-    glucoseReadings.set(phoneNumber, readings);
-
-    // Analyze risk
-    let response = '';
-    let emoji = '';
-
-    if (value < 70) {
-        // CRITICAL LOW - Hypoglycemia
-        emoji = '🚨';
-        response = user.language === 'hi' 
-            ? `${emoji} *गंभीर: निम्न शुगर!*\n\nआपका शुगर ${value} mg/dL है (बहुत कम)\n\n*तुरंत करें:*\n1. 3 ग्लूकोज़ टैबलेट या 1 चम्मच शहद लें\n2. 15 मिनट बाद फिर जांचें\n3. अभी भी कम है तो दोहराएं\n\n⚠️ डॉक्टर को सूचित कर दिया गया है!`
-            : `${emoji} *CRITICAL: Hypoglycemia!*\n\nYour glucose is ${value} mg/dL (VERY LOW)\n\n*Immediate Actions:*\n1. Eat 15g fast-acting carbs (3 glucose tablets OR 1 tbsp honey)\n2. Recheck after 15 minutes\n3. If still low, repeat step 1\n\n⚠️ Doctor has been alerted!`;
-        
-        // Alert doctor (implement this function)
-        await alertDoctor(phoneNumber, value, 'hypoglycemia');
-        
-    } else if (value >= 70 && value <= 130) {
-        // NORMAL
-        emoji = '✅';
-        response = user.language === 'hi'
-            ? `${emoji} *बहुत बढ़िया!*\n\nशुगर: ${value} mg/dL (सामान्य)\n\nऐसे ही जारी रखें! 🎉\n\n7-दिन औसत: ${calculate7DayAvg(phoneNumber)} mg/dL`
-            : `${emoji} *Excellent Control!*\n\nGlucose: ${value} mg/dL (Normal Range)\n\nKeep following your routine! 🎉\n\n7-Day Average: ${calculate7DayAvg(phoneNumber)} mg/dL`;
-            
-    } else if (value > 130 && value <= 180) {
-        // ELEVATED
-        emoji = '⚠️';
-        response = user.language === 'hi'
-            ? `${emoji} *ऊंचा शुगर*\n\nशुगर: ${value} mg/dL (लक्ष्य से अधिक)\n\n*सुझाव:*\n• दवा ली है ना जांच लें\n• 15 मिनट टहलें\n• 2 गिलास पानी पिएं\n• 2 घंटे में फिर जांचें\n\n7-दिन औसत: ${calculate7DayAvg(phoneNumber)} mg/dL`
-            : `${emoji} *Elevated Glucose*\n\nGlucose: ${value} mg/dL (Above Target)\n\n*Recommendations:*\n• Take medication if missed\n• Walk for 15 minutes\n• Drink water (2 glasses)\n• Recheck in 2 hours\n\n7-Day Average: ${calculate7DayAvg(phoneNumber)} mg/dL`;
-            
-    } else {
-        // CRITICAL HIGH
-        emoji = '🚨';
-        response = user.language === 'hi'
-            ? `${emoji} *गंभीर: उच्च शुगर!*\n\nशुगर: ${value} mg/dL (खतरनाक स्तर)\n\n*तुरंत करें:*\n1. अगर हो तो ketones जांचें\n2. इंसुलिन लें (अगर prescribed है)\n3. खूब पानी पिएं\n4. बारीकी से निगरानी करें\n\n⚠️ डॉक्टर को सूचित कर दिया गया है!\n\n📞 लक्षण बढ़ें (उल्टी, चक्कर) तो तुरंत emergency call करें!`
-            : `${emoji} *CRITICAL: High Blood Sugar!*\n\nGlucose: ${value} mg/dL (CRITICAL LEVEL)\n\n*Immediate Actions:*\n1. Check ketones if possible\n2. Take rapid-acting insulin (if prescribed)\n3. Drink plenty of water\n4. Monitor closely\n\n⚠️ Doctor notification sent!\n\n📞 If symptoms worsen (nausea, confusion), call emergency!`;
-        
-        // Alert doctor
-        await alertDoctor(phoneNumber, value, 'hyperglycemia');
-    }
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: response }
-    });
-
-    // Send quick actions after reading
-    setTimeout(() => sendQuickActions(phoneNumber), 3000);
-}
-
-// Calculate 7-day average
-function calculate7DayAvg(phoneNumber) {
-    const readings = glucoseReadings.get(phoneNumber);
-    if (!readings || readings.length === 0) return '--';
-
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    const recentReadings = readings.filter(r => new Date(r.timestamp) >= sevenDaysAgo);
-    if (recentReadings.length === 0) return '--';
-
-    const sum = recentReadings.reduce((acc, r) => acc + r.value, 0);
-    return Math.round(sum / recentReadings.length);
-}
-
-// Send diet advice
-async function sendDietAdvice(phoneNumber, language) {
-    const advice = language === 'hi'
-        ? `🥗 *आहार सुझाव*\n\n*✅ खाएं:*\n• साबुत अनाज: ब्राउन राइस, गेहूं की रोटी\n• सब्जियां: करेला, मेथी, पालक\n• प्रोटीन: मूंग दाल, चना, मछली\n• फल: अमरूद, पपीता, सेब (छोटा)\n• नट्स: 5-6 बादाम रोज\n\n*❌ न खाएं:*\n• सफेद चावल, मैदा\n• मीठा, कोल्ड ड्रिंक\n• तला हुआ खाना\n• आलू, सफेद ब्रेड\n\n*🍽️ नमूना भोजन:*\nसुबह: ओट्स + दूध + नट्स\nदोपहर: 2 रोटी + दाल + सब्जी\nस्नैक: छाछ + भुना चना\nरात: हल्का खाना शाम 7 बजे तक\n\n💡 हर 3-4 घंटे में थोड़ा-थोड़ा खाएं!`
-        : `🥗 *Personalized Diet Recommendations*\n\n*✅ Foods to Include:*\n• Whole grains: Brown rice, whole wheat roti, oats\n• Vegetables: Bitter gourd (karela), drumstick, leafy greens\n• Proteins: Moong dal, chickpeas, fish\n• Fruits: Guava, papaya, apple (1 small portion)\n• Nuts: 5-6 almonds daily\n\n*❌ Foods to Avoid:*\n• White rice, maida products\n• Sugary drinks, sweets\n• Fried foods (pakoras, samosas)\n• Potatoes, white bread\n\n*🍽️ Sample Meal Plan:*\nBreakfast: Oats + milk + nuts\nLunch: 2 rotis + dal + vegetables + salad\nSnack: Buttermilk + roasted chana\nDinner: Light meal by 7 PM\n\n💡 Eat every 3-4 hours in small portions!`;
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: advice }
-    });
-}
-
-// Analyze symptoms
-async function analyzeSymptoms(phoneNumber, symptoms, language) {
-    const response = language === 'hi'
-        ? `🤒 *लक्षण विश्लेषण*\n\nमैंने आपके लक्षण नोट कर लिए हैं।\n\n*संभावित कारण:*\n• बार-बार पेशाब → उच्च शुगर\n• अधिक प्यास → पानी की कमी\n• थकान → खराब शुगर नियंत्रण\n• धुंधला दिखना → शुगर में उतार-चढ़ाव\n• सुन्नपन/झनझनाहट → neuropathy\n\n*⚠️ सुझाव:*\nतुरंत शुगर जांचें और अगर लक्षण 2 दिन से ज्यादा रहें तो डॉक्टर से मिलें।\n\nक्या आप टेलीमेडिसिन परामर्श चाहेंगे?`
-        : `🤒 *Symptom Analysis*\n\nI've noted your symptoms.\n\n*Possible Issues:*\n• Frequent urination → High blood sugar\n• Excessive thirst → Dehydration\n• Fatigue → Poor glucose control\n• Blurred vision → Fluctuating sugar\n• Numbness/tingling → Possible neuropathy\n\n*⚠️ Recommendation:*\nCheck blood sugar immediately and consult doctor if symptoms persist for more than 2 days.\n\nWould you like to schedule a telemedicine consultation?`;
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: response }
-    });
-}
-
-// Send medication help
-async function sendMedicationHelp(phoneNumber, language) {
-    const help = language === 'hi'
-        ? `💊 *दवा प्रबंधन*\n\n*सामान्य दवाएं:*\n\n*Metformin:*\n• खाने के साथ लें\n• पेट खराब होने से बचाता है\n\n*Insulin:*\n• फ्रिज में रखें\n• injection की जगह बदलते रहें\n• समय पर लें\n\n*📱 रिमाइंडर:*\nमैं आपको रोज याद दिला सकता हूं।\n\nवर्तमान रिमाइंडर: सुबह 8 बजे और शाम 8 बजे\n\n⚠️ महत्वपूर्ण: डॉक्टर से पूछे बिना दवा न बदलें!`
-        : `💊 *Medication Management*\n\n*Common Diabetes Medications:*\n\n*Metformin:*\n• Take with meals\n• Reduces stomach upset\n\n*Insulin:*\n• Store in refrigerator\n• Rotate injection sites\n• Take at prescribed times\n\n*📱 Reminder Settings:*\nI can send you daily reminders.\n\nCurrent reminders: 8:00 AM & 8:00 PM\n\n⚠️ Important: Never skip or adjust doses without consulting your doctor!`;
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: help }
-    });
-}
-
-// Send health report
-async function sendHealthReport(phoneNumber, language) {
-    const readings = glucoseReadings.get(phoneNumber);
-    const avg = calculate7DayAvg(phoneNumber);
-    const hba1c = avg !== '--' ? ((avg + 46.7) / 28.7).toFixed(1) : '--';
-    
-    const report = language === 'hi'
-        ? `📊 *स्वास्थ्य रिपोर्ट*\n\n*मुख्य मेट्रिक्स:*\n• 7-दिन औसत: ${avg} mg/dL\n• अनुमानित HbA1c: ${hba1c}%\n• कुल रीडिंग: ${readings.length}\n• दवा पालन: 85%\n\n*हालिया रीडिंग:*\n${getRecentReadings(phoneNumber, 5)}\n\n📈 अधिक विस्तृत चार्ट के लिए, हम आपको वेब डैशबोर्ड लिंक भेज सकते हैं।`
-        : `📊 *Health Dashboard Report*\n\n*Key Metrics:*\n• 7-Day Average: ${avg} mg/dL\n• Estimated HbA1c: ${hba1c}%\n• Total Readings: ${readings.length}\n• Medication Adherence: 85%\n\n*Recent Readings:*\n${getRecentReadings(phoneNumber, 5)}\n\n📈 For detailed charts, we can send you a web dashboard link.`;
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: report }
-    });
-}
-
-// Get recent readings formatted
-function getRecentReadings(phoneNumber, count) {
-    const readings = glucoseReadings.get(phoneNumber);
-    if (!readings || readings.length === 0) return 'No readings yet';
-
-    return readings
-        .slice(-count)
-        .reverse()
-        .map((r, i) => {
-            const date = new Date(r.timestamp);
-            const status = r.value < 70 || r.value > 180 ? '🔴' : r.value > 130 ? '🟡' : '🟢';
-            return `${status} ${r.value} mg/dL - ${date.toLocaleDateString()}`;
-        })
-        .join('\n');
-}
-
-// Send general help
-async function sendGeneralHelp(phoneNumber, language) {
-    const help = language === 'hi'
-        ? `मैं आपकी मदद के लिए हूं! 😊\n\n*मैं क्या कर सकता हूं:*\n\n📊 *शुगर लॉग करें*\nबस कहें: "मेरी शुगर 120 है"\n\n🥗 *आहार सलाह*\nपूछें: "क्या खाना चाहिए?"\n\n💊 *दवा याद दिलाना*\nकहें: "दवा"\n\n🤒 *लक्षण ट्रैकिंग*\nबताएं: "मुझे चक्कर आ रहे हैं"\n\n📈 *स्वास्थ्य रिपोर्ट*\nकहें: "रिपोर्ट दिखाओ"\n\nआज मैं आपकी कैसे मदद कर सकता हूं?`
-        : `I'm here to help! 😊\n\n*I can assist you with:*\n\n📊 *Log glucose readings*\nJust say: "My sugar is 120"\n\n🥗 *Diet & nutrition advice*\nAsk: "What should I eat?"\n\n💊 *Medication reminders*\nSay: "Medication"\n\n🤒 *Symptom tracking*\nTell me: "I'm feeling dizzy"\n\n📈 *View health trends*\nSay: "Show my report"\n\nHow can I help you today?`;
-
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { body: help }
-    });
-}
-
-// Set user language
-async function setLanguage(phoneNumber, language) {
-    const user = userDatabase.get(phoneNumber);
-    user.language = language;
-    userDatabase.set(phoneNumber, user);
-
-    const langNames = {
-        'en': 'English',
-        'hi': 'हिन्दी',
-        'kn': 'ಕನ್ನಡ',
-        'te': 'తెలుగు'
+    const audioPart = {
+      inlineData: {
+        data: audioBuffer.toString('base64'),
+        mimeType: 'audio/ogg'
+      }
     };
 
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'text',
-        text: { 
-            body: language === 'hi' 
-                ? `✓ भाषा बदल दी गई: ${langNames[language]}`
-                : `✓ Language changed to ${langNames[language]}`
-        }
-    });
+    const result = await model.generateContent([
+      "Transcribe this audio message. The speaker may be talking about their blood sugar levels, symptoms, or asking questions about diabetes management. Provide only the transcription in the language spoken.",
+      audioPart
+    ]);
 
-    sendQuickActions(phoneNumber);
+    return result.response.text();
+  } catch (error) {
+    console.error('Transcription error:', error.message);
+    return null;
+  }
 }
 
-// ============================================
-// WHATSAPP API FUNCTIONS
-// ============================================
+async function analyzeWithGemini(patientPhone, userMessage, conversationHistory = []) {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Send WhatsApp message
-async function sendWhatsAppMessage(to, messageObject) {
-    try {
-        const response = await axios({
-            method: 'POST',
-            url: `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-            headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            data: {
-                messaging_product: 'whatsapp',
-                to: to,
-                ...messageObject
+    // Get patient context
+    const patient = await Patient.findOne({ phone: patientPhone });
+    const recentReadings = await GlucoseReading.find({ patientPhone })
+      .sort({ timestamp: -1 })
+      .limit(10);
+
+    const contextPrompt = `
+PATIENT CONTEXT:
+${patient ? `Name: ${patient.name}, Age: ${patient.age}, Type: ${patient.diabetesType}` : 'New patient - collect information'}
+
+RECENT GLUCOSE READINGS:
+${recentReadings.map(r => `${r.timestamp.toLocaleDateString()}: ${r.reading} mg/dL (${r.readingType})`).join('\n') || 'No previous readings'}
+
+CONVERSATION HISTORY:
+${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+
+CURRENT USER MESSAGE:
+${userMessage}
+
+TASK: Analyze the message and provide:
+1. A helpful, empathetic response
+2. Extract any glucose reading data (value, type, time)
+3. Identify any concerning symptoms or patterns
+4. Provide relevant advice based on medical guidelines
+
+Format your response as natural conversation. If you extract glucose data, mention it naturally in your response.`;
+
+    const result = await model.generateContent([SYSTEM_PROMPT, contextPrompt]);
+    return result.response.text();
+  } catch (error) {
+    console.error('Gemini AI error:', error.message);
+    return "I'm having trouble processing your message right now. Please try again in a moment.";
+  }
+}
+
+async function extractGlucoseData(message, aiResponse) {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const extractionPrompt = `From this conversation, extract ONLY glucose reading data in JSON format:
+
+User message: "${message}"
+AI response: "${aiResponse}"
+
+Return ONLY a JSON object (no markdown, no explanation) with this structure:
+{
+  "hasReading": true/false,
+  "reading": number or null,
+  "readingType": "fasting" or "postprandial" or "random" or null,
+  "symptoms": ["symptom1", "symptom2"] or [],
+  "notes": "any additional context" or null
+}
+
+If no glucose reading is mentioned, return {"hasReading": false}`;
+
+    const result = await model.generateContent(extractionPrompt);
+    const jsonText = result.response.text().replace(/```json\n?|\n?```/g, '').trim();
+    return JSON.parse(jsonText);
+  } catch (error) {
+    console.error('Extraction error:', error.message);
+    return { hasReading: false };
+  }
+}
+
+async function checkCriticalLevels(reading, readingType, patientPhone) {
+  const thresholds = MEDICAL_THRESHOLDS[readingType] || MEDICAL_THRESHOLDS.random;
+  
+  let isCritical = false;
+  let alertMessage = '';
+
+  if (reading < thresholds.critical_low) {
+    isCritical = true;
+    alertMessage = `🚨 CRITICAL ALERT: Hypoglycemia detected for patient ${patientPhone}\nReading: ${reading} mg/dL\nImmediate action required!`;
+  } else if (reading > thresholds.critical_high) {
+    isCritical = true;
+    alertMessage = `🚨 CRITICAL ALERT: Severe hyperglycemia for patient ${patientPhone}\nReading: ${reading} mg/dL\nImmediate medical attention needed!`;
+  }
+
+  if (isCritical && PHYSICIAN_PHONE) {
+    // Alert physician
+    await sendWhatsAppMessage(PHYSICIAN_PHONE, alertMessage);
+    
+    // Alert patient
+    await sendWhatsAppMessage(patientPhone, 
+      "⚠️ Your glucose level is in a critical range. Your doctor has been notified. Please seek immediate medical attention if you're feeling unwell."
+    );
+  }
+
+  return isCritical;
+}
+
+async function analyzeTrends(patientPhone) {
+  const last7Days = new Date();
+  last7Days.setDate(last7Days.getDate() - 7);
+
+  const readings = await GlucoseReading.find({
+    patientPhone,
+    timestamp: { $gte: last7Days }
+  }).sort({ timestamp: -1 });
+
+  if (readings.length < 3) return null;
+
+  const avgReading = readings.reduce((sum, r) => sum + r.reading, 0) / readings.length;
+  const highReadings = readings.filter(r => r.reading > 180).length;
+  const lowReadings = readings.filter(r => r.reading < 70).length;
+
+  let trendMessage = '';
+  
+  if (highReadings > readings.length * 0.5) {
+    trendMessage = `📊 Weekly Trend Alert: More than half of your readings this week were high (>180 mg/dL). Consider reviewing your diet and medication with your doctor.`;
+  } else if (lowReadings > 2) {
+    trendMessage = `📊 Weekly Trend Alert: You've had ${lowReadings} low glucose readings this week. Please discuss this pattern with your doctor.`;
+  } else if (avgReading > 160) {
+    trendMessage = `📊 Weekly Trend: Your average glucose is ${avgReading.toFixed(1)} mg/dL. Let's work on bringing this closer to target range (<140 mg/dL).`;
+  }
+
+  return trendMessage;
+}
+
+// Webhook verification
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('Webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// Webhook message handler
+app.post('/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+
+    if (body.object === 'whatsapp_business_account') {
+      const changes = body.entry?.[0]?.changes?.[0];
+      const value = changes?.value;
+
+      if (value?.messages?.[0]) {
+        const message = value.messages[0];
+        const from = message.from;
+        const messageType = message.type;
+
+        let userMessage = '';
+
+        // Handle different message types
+        if (messageType === 'text') {
+          userMessage = message.text.body;
+        } else if (messageType === 'audio') {
+          const audioBuffer = await downloadWhatsAppMedia(message.audio.id);
+          if (audioBuffer) {
+            const transcription = await transcribeAudio(audioBuffer);
+            if (transcription) {
+              userMessage = transcription;
+              await sendWhatsAppMessage(from, `🎤 I heard: "${transcription}"\n\nLet me help you with that...`);
+            } else {
+              await sendWhatsAppMessage(from, "Sorry, I couldn't transcribe your voice message. Could you please type your message?");
+              return res.sendStatus(200);
             }
+          }
+        } else {
+          await sendWhatsAppMessage(from, "I currently support text and voice messages. Please send your message as text or voice note.");
+          return res.sendStatus(200);
+        }
+
+        // Get or create conversation
+        let conversation = await Conversation.findOne({ patientPhone: from });
+        if (!conversation) {
+          conversation = new Conversation({
+            patientPhone: from,
+            messages: []
+          });
+        }
+
+        // Add user message to history
+        conversation.messages.push({
+          role: 'user',
+          content: userMessage,
+          timestamp: new Date()
         });
 
-        console.log('✅ Message sent:', response.data);
-        return response.data;
-    } catch (error) {
-        console.error('❌ Failed to send message:', error.response?.data || error.message);
-        throw error;
-    }
-}
-
-// Send quick action buttons
-async function sendQuickActions(phoneNumber) {
-    await sendWhatsAppMessage(phoneNumber, {
-        type: 'interactive',
-        interactive: {
-            type: 'button',
-            body: {
-                text: 'Quick Actions:'
-            },
-            action: {
-                buttons: [
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'log_sugar',
-                            title: '📊 Log Sugar'
-                        }
-                    },
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'diet_advice',
-                            title: '🥗 Diet Advice'
-                        }
-                    },
-                    {
-                        type: 'reply',
-                        reply: {
-                            id: 'dashboard',
-                            title: '📈 Dashboard'
-                        }
-                    }
-                ]
-            }
+        // Keep last 20 messages for context
+        if (conversation.messages.length > 20) {
+          conversation.messages = conversation.messages.slice(-20);
         }
-    });
-}
 
-// Get media URL (for voice messages)
-async function getMediaUrl(mediaId) {
-    try {
-        const response = await axios({
-            method: 'GET',
-            url: `https://graph.facebook.com/v18.0/${mediaId}`,
-            headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`
-            }
+        // Get AI response
+        const aiResponse = await analyzeWithGemini(from, userMessage, conversation.messages);
+
+        // Add AI response to history
+        conversation.messages.push({
+          role: 'assistant',
+          content: aiResponse,
+          timestamp: new Date()
         });
-        return response.data.url;
-    } catch (error) {
-        console.error('Failed to get media URL:', error);
-        throw error;
+
+        conversation.lastActive = new Date();
+        await conversation.save();
+
+        // Send response to user
+        await sendWhatsAppMessage(from, aiResponse);
+
+        // Extract and save glucose data
+        const glucoseData = await extractGlucoseData(userMessage, aiResponse);
+        
+        if (glucoseData.hasReading && glucoseData.reading) {
+          const reading = new GlucoseReading({
+            patientPhone: from,
+            reading: glucoseData.reading,
+            readingType: glucoseData.readingType || 'random',
+            symptoms: glucoseData.symptoms || [],
+            notes: glucoseData.notes
+          });
+
+          await reading.save();
+
+          // Check for critical levels
+          const isCritical = await checkCriticalLevels(
+            glucoseData.reading,
+            glucoseData.readingType || 'random',
+            from
+          );
+
+          if (isCritical) {
+            reading.alertSent = true;
+            await reading.save();
+          }
+
+          // Send trend analysis weekly
+          const trendMessage = await analyzeTrends(from);
+          if (trendMessage) {
+            setTimeout(() => sendWhatsAppMessage(from, trendMessage), 2000);
+          }
+        }
+      }
     }
-}
 
-// Alert doctor (implement with your notification system)
-async function alertDoctor(phoneNumber, glucoseValue, alertType) {
-    // TODO: Implement doctor notification
-    // Options:
-    // 1. SMS to doctor's number
-    // 2. Email notification
-    // 3. Push notification to doctor dashboard
-    // 4. WhatsApp message to doctor
-    
-    console.log(`🚨 DOCTOR ALERT: Patient ${phoneNumber} has ${alertType} - Glucose: ${glucoseValue}`);
-    
-    // Example: Send to doctor's WhatsApp (if you have their number)
-    // const doctorPhone = 'DOCTOR_PHONE_NUMBER';
-    // await sendWhatsAppMessage(doctorPhone, {
-    //     type: 'text',
-    //     text: {
-    //         body: `🚨 ALERT: Patient ${phoneNumber}\n${alertType}\nGlucose: ${glucoseValue} mg/dL\n\nPlease review immediately.`
-    //     }
-    // });
-}
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Webhook error:', error);
+    res.sendStatus(500);
+  }
+});
 
-// ============================================
-// SCHEDULED TASKS (Medication Reminders)
-// ============================================
-
-// Send medication reminders at 8 AM and 8 PM
-function scheduleMedicationReminders() {
-    const schedule = require('node-schedule');
+// Scheduled reminders
+cron.schedule('0 8 * * *', async () => {
+  // Morning medication reminder
+  const patients = await Patient.find({ 'reminderPreferences.medication': true });
+  
+  for (const patient of patients) {
+    const morningMeds = patient.medicationSchedule.filter(med => 
+      med.time.includes('morning') || med.time.includes('8')
+    );
     
-    // Morning reminder (8 AM)
-    schedule.scheduleJob('0 8 * * *', async () => {
-        for (let [phoneNumber, user] of userDatabase) {
-            const message = user.language === 'hi'
-                ? '💊 *दवा याद दिलाना*\n\nसुबह की दवा लेने का समय!\n\nखाने के साथ लें। लेने के बाद "TAKEN" लिखें।'
-                : '💊 *Medication Reminder*\n\nTime for your morning medication!\n\nTake with breakfast. Reply "TAKEN" when completed.';
-            
-            await sendWhatsAppMessage(phoneNumber, {
-                type: 'text',
-                text: { body: message }
-            });
-        }
+    if (morningMeds.length > 0) {
+      const message = `🌅 Good morning! Time for your medication:\n${morningMeds.map(m => `• ${m.medicationName}`).join('\n')}\n\nDon't forget to log your fasting glucose level!`;
+      await sendWhatsAppMessage(patient.phone, message);
+    }
+  }
+});
+
+cron.schedule('0 20 * * *', async () => {
+  // Evening glucose logging reminder
+  const patients = await Patient.find({ 'reminderPreferences.glucoseLogging': true });
+  
+  for (const patient of patients) {
+    const todayReadings = await GlucoseReading.find({
+      patientPhone: patient.phone,
+      timestamp: { $gte: new Date().setHours(0, 0, 0, 0) }
     });
-    
-    // Evening reminder (8 PM)
-    schedule.scheduleJob('0 20 * * *', async () => {
-        for (let [phoneNumber, user] of userDatabase) {
-            const message = user.language === 'hi'
-                ? '💊 *दवा याद दिलाना*\n\nशाम की दवा लेने का समय!\n\nखाने के साथ लें। लेने के बाद "TAKEN" लिखें।'
-                : '💊 *Medication Reminder*\n\nTime for your evening medication!\n\nTake with dinner. Reply "TAKEN" when completed.';
-            
-            await sendWhatsAppMessage(phoneNumber, {
-                type: 'text',
-                text: { body: message }
-            });
-        }
-    });
-}
 
-// ============================================
-// HEALTH CHECK ENDPOINT
-// ============================================
+    if (todayReadings.length === 0) {
+      await sendWhatsAppMessage(patient.phone, 
+        "🌙 Evening reminder: Don't forget to log your glucose reading today! Send me your levels anytime."
+      );
+    }
+  }
+});
+
+// Health check endpoint
 app.get('/', (req, res) => {
-    res.json({
-        status: 'running',
-        service: 'Gluco-Sahayak WhatsApp Bot',
-        version: '1.0.0',
-        users: userDatabase.size,
-        totalReadings: Array.from(glucoseReadings.values()).reduce((sum, arr) => sum + arr.length, 0)
-    });
+  res.send('Gluco Sahayak Bot is running! 🩺');
 });
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
-
-// ============================================
-// START SERVER
-// ============================================
 app.listen(PORT, () => {
-    console.log(`🚀 Gluco-Sahayak server running on port ${PORT}`);
-    console.log(`📱 WhatsApp webhook ready at /webhook`);
-    scheduleMedicationReminders();
+  console.log(`Server is running on port ${PORT}`);
 });
-
-// Export for testing
-module.exports = app;
