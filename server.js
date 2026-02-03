@@ -15,104 +15,87 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// Claude Configuration
+// Claude - Use claude-3-5-sonnet-latest or claude-3-sonnet-20240229
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_VERSION = '2023-06-01';
+const CLAUDE_MODEL = 'claude-3-5-sonnet-latest'; // This will always use latest
 let isClaudeAvailable = false;
 
-// Test Claude API on startup
 async function initializeClaude() {
-  try {
-    if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === 'your_anthropic_api_key_here') {
-      console.warn('⚠️  Claude API key not configured - using fallback mode');
-      return false;
-    }
+  if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === 'your_anthropic_api_key_here') {
+    console.warn('⚠️  Claude API key not set');
+    return false;
+  }
 
-    // Test API connection
-    const response = await axios.post(
-      CLAUDE_API_URL,
-      {
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 100,
-        messages: [{ role: 'user', content: 'Hi' }]
+  try {
+    const response = await axios.post(CLAUDE_API_URL, {
+      model: CLAUDE_MODEL,
+      max_tokens: 50,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
       },
-      {
-        headers: {
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': CLAUDE_VERSION,
-          'content-type': 'application/json'
-        }
-      }
-    );
+      timeout: 10000
+    });
 
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
-      console.log('✅ Claude (Anthropic) connected successfully');
+      console.log(`✅ Claude connected (${CLAUDE_MODEL})`);
       return true;
     }
   } catch (error) {
-    console.error('❌ Claude initialization failed:', error.response?.data || error.message);
-    isClaudeAvailable = false;
-    return false;
+    console.error('❌ Claude failed:', error.response?.data?.error?.message || error.message);
+    console.log('ℹ️  Using fallback');
   }
+  return false;
 }
 
 initializeClaude();
 
-// MongoDB Schemas
+// MongoDB
 const patientSchema = new mongoose.Schema({
-  phone: { type: String, required: true, unique: true },
+  phone: String,
   name: String,
   age: Number,
   diabetesType: String,
   registeredAt: { type: Date, default: Date.now },
-  language: { type: String, default: 'en' },
-  medicationSchedule: [{
-    medicationName: String,
-    time: String,
-    frequency: String
-  }],
-  reminderPreferences: {
-    glucoseLogging: { type: Boolean, default: true },
-    medication: { type: Boolean, default: true }
-  }
+  medicationSchedule: [{ medicationName: String, time: String }],
+  reminderPreferences: { glucoseLogging: Boolean, medication: Boolean }
 });
 
 const glucoseReadingSchema = new mongoose.Schema({
-  patientPhone: { type: String, required: true },
-  reading: { type: Number, required: true },
-  readingType: { type: String, enum: ['fasting', 'postprandial', 'random'], required: true },
+  patientPhone: String,
+  reading: Number,
+  readingType: { type: String, enum: ['fasting', 'postprandial', 'random'] },
   timestamp: { type: Date, default: Date.now },
   symptoms: [String],
   notes: String,
-  alertSent: { type: Boolean, default: false }
+  alertSent: Boolean
 });
 
 const conversationSchema = new mongoose.Schema({
   patientPhone: String,
-  messages: [{
-    role: String,
-    content: String,
-    timestamp: { type: Date, default: Date.now }
-  }],
-  lastActive: { type: Date, default: Date.now }
+  messages: [{ role: String, content: String, timestamp: Date }],
+  lastActive: Date
 });
 
 const Patient = mongoose.model('Patient', patientSchema);
 const GlucoseReading = mongoose.model('GlucoseReading', glucoseReadingSchema);
 const Conversation = mongoose.model('Conversation', conversationSchema);
 
-mongoose.connect(MONGODB_URI).then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
+mongoose.connect(MONGODB_URI).then(() => console.log('✅ MongoDB'))
+  .catch(err => console.error('❌ MongoDB:', err.message));
 
-// Medical Thresholds (CMR Guidelines 2018, IDF Atlas 2021, WHO)
-const MEDICAL_THRESHOLDS = {
-  fasting: { normal: { max: 100 }, diabetes: { min: 126 }, critical_low: 70, critical_high: 250 },
-  postprandial: { normal: { max: 140 }, diabetes: { min: 200 }, critical_low: 70, critical_high: 300 },
+// Medical Thresholds
+const THRESHOLDS = {
+  fasting: { critical_low: 70, critical_high: 250 },
+  postprandial: { critical_low: 70, critical_high: 300 },
   random: { critical_low: 70, critical_high: 250 }
 };
 
-// WhatsApp Functions
+// WhatsApp
 async function sendWhatsAppMessage(to, message) {
   try {
     await axios.post(`https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`, {
@@ -120,348 +103,128 @@ async function sendWhatsAppMessage(to, message) {
       to,
       type: 'text',
       text: { body: message }
-    }, {
-      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` }
-    });
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` } });
     console.log(`✅ Sent to ${to}`);
-  } catch (error) {
-    console.error('❌ Send error:', error.response?.data || error.message);
+  } catch (e) {
+    console.error('❌ Send failed');
   }
 }
 
-async function downloadWhatsAppMedia(mediaId) {
-  try {
-    const { data } = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}`, {
-      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` }
-    });
-    
-    const mediaResponse = await axios.get(data.url, {
-      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` },
-      responseType: 'arraybuffer'
-    });
-    
-    return Buffer.from(mediaResponse.data);
-  } catch (error) {
-    console.error('❌ Media download failed:', error.message);
-    return null;
-  }
-}
-
-// Note: Would need separate transcription service for audio
-async function transcribeAudio(audioBuffer) {
-  console.warn('⚠️  Audio transcription requires additional service');
-  return null;
-}
-
-// Smart Fallback System
-function generateSmartResponse(message) {
-  const lower = message.toLowerCase();
-  const glucoseMatch = message.match(/(\d{2,3})/);
-  const glucose = glucoseMatch ? parseInt(glucoseMatch[1]) : null;
+// Fallback
+function fallbackResponse(msg) {
+  const lower = msg.toLowerCase();
+  const num = msg.match(/(\d{2,3})/);
+  const glucose = num ? parseInt(num[1]) : null;
   
-  // Greetings
-  if (lower.match(/^(hi|hello|hey|namaste|नमस्ते)/)) {
-    return `Hello! 🙏 I'm Gluco Sahayak, your diabetes assistant.
-
-I help with:
-📊 Glucose logging
-🍽️ Diet advice
-🚶 Exercise tips
-💊 Medication reminders
-
-Send: "My sugar is 120" or ask anything! 😊`;
+  if (lower.match(/^(hi|hello|namaste)/)) {
+    return `Hello! 🙏 I'm Gluco Sahayak.\n\n📊 Log glucose\n🍽️ Diet tips\n🚶 Exercise\n💊 Reminders\n\nSend: "My sugar is 120" 😊`;
   }
   
-  // Glucose readings
   if (glucose && glucose >= 40 && glucose <= 500) {
-    let response = `✅ Logged: ${glucose} mg/dL\n\n`;
-    
-    if (glucose < 70) {
-      response += `🚨 LOW! (Hypoglycemia)
-
-DO NOW:
-• Eat 15g fast carbs (juice/honey/glucose tablets)
-• Rest 15 min
-• Recheck
-• If still low, repeat
-
-Get help if worse! 🏥`;
-    } else if (glucose <= 100) {
-      response += `✅ EXCELLENT! Normal range.
-
-Keep it up:
-• Healthy eating
-• Stay active
-• Take meds
-Great job! 👏`;
-    } else if (glucose <= 125) {
-      response += `⚠️ PREDIABETES range
-
-Improve:
-• More vegetables
-• Daily walk 30min
-• Less rice/sweets
-• See doctor`;
-    } else if (glucose <= 180) {
-      response += `⚠️ ELEVATED
-
-Action:
-• Review diet
-• Exercise daily
-• Check medication
-• Monitor closely`;
-    } else if (glucose <= 250) {
-      response += `🚨 HIGH!
-
-Steps:
-• Drink water
-• No sweets
-• Walk 15min
-• Recheck in 2hr
-• Call doctor if stays high`;
-    } else {
-      response += `🚨🚨 CRITICAL HIGH!
-
-URGENT:
-• Contact doctor NOW
-• Drink water
-• DON'T exercise
-• Watch for nausea/confusion
-• Go to ER if very sick! 🏥`;
-    }
-    return response;
+    let r = `✅ Logged: ${glucose} mg/dL\n\n`;
+    if (glucose < 70) r += `🚨 LOW! Eat 15g carbs now. Rest 15min. Recheck.`;
+    else if (glucose <= 100) r += `✅ EXCELLENT! Normal range. Keep it up! 👏`;
+    else if (glucose <= 125) r += `⚠️ PREDIABETES. More vegetables, walk 30min daily, see doctor.`;
+    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet, exercise, medication.`;
+    else if (glucose <= 250) r += `🚨 HIGH! Drink water, avoid sweets, walk 15min, recheck in 2hr.`;
+    else r += `🚨🚨 CRITICAL! Contact doctor NOW. Drink water. Don't exercise. Go to ER if sick!`;
+    return r;
   }
   
-  // Diet
-  if (lower.match(/eat|food|diet|breakfast|lunch|dinner/)) {
-    return `🍽️ Diabetes Diet
-
-MEALS:
-• Breakfast: Oats/upma + egg/paneer
-• Lunch: Roti + dal + vegetables + salad
-• Dinner: Light, early (before 8pm)
-• Snacks: Nuts, fruits, roasted chana
-
-AVOID:
-❌ White rice, sweets, fried foods, sugary drinks
-
-CHOOSE:
-✅ Vegetables, whole grains, protein, water
-
-Portion control is key! 💪`;
+  if (lower.match(/eat|food|diet/)) {
+    return `🍽️ Diet:\n• Breakfast: Oats + egg\n• Lunch: Roti + dal + vegetables\n• Dinner: Light\n• Snacks: Nuts, fruits\n\nAVOID: Rice, sweets, fried foods 💪`;
   }
   
-  // Exercise
   if (lower.match(/exercise|walk|yoga/)) {
-    return `🚶 Exercise Guide
-
-DAILY:
-• Walk 30-45 min
-• After meals: 15-20 min
-• Yoga: Surya namaskar, pranayama
-
-SAFETY:
-⚠️ Check glucose first
-⚠️ Don't exercise if >250
-⚠️ Carry glucose tablets
-⚠️ Stay hydrated
-
-Best time: 1-2hr after meals 💪`;
+    return `🚶 Exercise:\n• Walk 30-45min daily\n• After meals: 15-20min\n• Yoga: Surya namaskar\n\n⚠️ Check glucose first\n⚠️ Don't exercise if >250`;
   }
   
-  // Default
-  return `Got it: "${message}"
-
-How can I help?
-📊 "My sugar is 120"
-🍽️ "What to eat?"
-🚶 "Exercise tips?"
-💊 "Set reminder"
-
-Just ask! 😊`;
+  return `Got it! How can I help?\n📊 "My sugar is 120"\n🍽️ "What to eat?"\n🚶 "Exercise tips?"`;
 }
 
-// Claude AI Integration
-async function analyzeWithClaude(phone, message, history = []) {
-  if (isClaudeAvailable) {
-    try {
-      const patient = await Patient.findOne({ phone });
-      const readings = await GlucoseReading.find({ patientPhone: phone })
-        .sort({ timestamp: -1 }).limit(5);
+// Claude AI
+async function analyzeWithClaude(phone, msg) {
+  if (!isClaudeAvailable) return fallbackResponse(msg);
 
-      const systemPrompt = `You are Gluco Sahayak, a caring and knowledgeable diabetes management assistant for patients in India.
+  try {
+    const patient = await Patient.findOne({ phone });
+    const readings = await GlucoseReading.find({ patientPhone: phone }).sort({ timestamp: -1 }).limit(5);
 
-PATIENT CONTEXT:
-- Name: ${patient?.name || 'New patient'}
-- Recent glucose readings: ${readings.map(r => `${r.reading} mg/dL (${r.readingType})`).join(', ') || 'No previous readings'}
+    const system = `You are Gluco Sahayak, diabetes assistant for Indian patients.
 
-MEDICAL GUIDELINES (CMR 2018, IDF 2021, WHO):
-- Fasting glucose: Normal <100 mg/dL, Prediabetes 100-125, Diabetes ≥126
-- Postprandial (2hr after eating): Normal <140, Prediabetes 140-199, Diabetes ≥200
-- Critical levels requiring immediate action: <70 (hypoglycemia) or >250 (severe hyperglycemia)
-- HbA1c target: <7% for most adults with diabetes
+Patient: ${patient?.name || 'New'}
+Recent: ${readings.map(r => `${r.reading}mg/dL`).join(', ') || 'None'}
 
-YOUR ROLE:
-1. Acknowledge and log glucose readings when mentioned
-2. Provide evidence-based diet and lifestyle advice tailored for Indian patients
-3. Be warm, empathetic, supportive and culturally sensitive
-4. Use Indian dietary context: roti, dal, sabzi, rice, Indian fruits and vegetables
-5. Suggest locally appropriate exercises: walking, yoga (Surya namaskar, pranayama)
-6. For critical glucose levels (<70 or >250), provide urgent guidance and strongly recommend immediate medical attention
-7. Always clarify that you provide general guidance, not a replacement for doctor consultation
-8. Be encouraging and non-judgmental about glucose readings
-9. Provide practical, actionable advice
+Guidelines: Fasting <100 normal, <70 or >250 critical
+Be warm, concise (150 words), Indian context (roti, dal, walking, yoga)
+Acknowledge glucose if mentioned, give actionable advice
 
-RESPONSE GUIDELINES:
-- Keep responses concise (maximum 150 words)
-- Be conversational and friendly
-- If glucose data is mentioned, acknowledge it and provide specific, relevant advice
-- For normal readings: praise and encourage continuation
-- For abnormal readings: explain concern clearly and give specific steps
-- Always end with supportive, encouraging note
+User: "${msg}"`;
 
-Current user message: "${message}"
+    const response = await axios.post(CLAUDE_API_URL, {
+      model: CLAUDE_MODEL,
+      max_tokens: 400,
+      system,
+      messages: [{ role: 'user', content: msg }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      timeout: 15000
+    });
 
-Respond in a helpful, caring manner:`;
-
-      const response = await axios.post(
-        CLAUDE_API_URL,
-        {
-          model: 'claude-3-5-sonnet-20241022',
-          max_tokens: 500,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: message }]
-        },
-        {
-          headers: {
-            'x-api-key': ANTHROPIC_API_KEY,
-            'anthropic-version': CLAUDE_VERSION,
-            'content-type': 'application/json'
-          },
-          timeout: 15000
-        }
-      );
-
-      const aiResponse = response.data?.content?.[0]?.text;
-      
-      if (aiResponse && aiResponse.length > 10) {
-        console.log('✅ Claude response generated');
-        return aiResponse;
-      }
-    } catch (error) {
-      console.error('❌ Claude error:', error.response?.data || error.message);
-      // Fall through to fallback
+    const text = response.data?.content?.[0]?.text;
+    if (text) {
+      console.log('✅ Claude response');
+      return text;
     }
+  } catch (e) {
+    console.error('❌ Claude error');
   }
   
-  console.log('ℹ️ Using fallback response');
-  return generateSmartResponse(message);
+  return fallbackResponse(msg);
 }
 
-function extractGlucoseData(message) {
-  const match = message.match(/(\d{2,3})/);
+function extractGlucose(msg) {
+  const match = msg.match(/(\d{2,3})/);
   const reading = match ? parseInt(match[1]) : null;
-  
   if (!reading || reading < 40 || reading > 500) return { hasReading: false };
 
-  const lower = message.toLowerCase();
-  const readingType = lower.match(/fasting|empty|morning/) ? 'fasting' :
-                       lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
+  const lower = msg.toLowerCase();
+  const type = lower.match(/fasting|empty|morning/) ? 'fasting' :
+               lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
 
-  const symptoms = [];
-  ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
-    if (lower.includes(s)) symptoms.push(s);
-  });
-
-  return {
-    hasReading: true,
-    reading,
-    readingType,
-    symptoms,
-    notes: message.substring(0, 200)
-  };
+  return { hasReading: true, reading, readingType: type, notes: msg.substring(0, 200) };
 }
 
-async function checkCriticalLevels(reading, type, phone) {
-  const thresh = MEDICAL_THRESHOLDS[type] || MEDICAL_THRESHOLDS.random;
+async function checkCritical(reading, type, phone) {
+  const t = THRESHOLDS[type] || THRESHOLDS.random;
   let critical = false;
   let alert = '';
 
-  if (reading < thresh.critical_low) {
+  if (reading < t.critical_low) {
     critical = true;
-    alert = `🚨 CRITICAL: HYPOGLYCEMIA ALERT
-
-Patient: ${phone}
-Reading: ${reading} mg/dL
-Type: ${type}
-Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-
-⚠️ IMMEDIATE ACTION REQUIRED
-Patient needs urgent attention for dangerously low blood sugar!`;
-    
-  } else if (reading > thresh.critical_high) {
+    alert = `🚨 HYPOGLYCEMIA\nPatient: ${phone}\nReading: ${reading}\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ URGENT`;
+  } else if (reading > t.critical_high) {
     critical = true;
-    alert = `🚨 CRITICAL: HYPERGLYCEMIA ALERT
-
-Patient: ${phone}
-Reading: ${reading} mg/dL
-Type: ${type}
-Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
-
-⚠️ HIGH PRIORITY
-Patient requires immediate medical evaluation for severely elevated glucose!`;
+    alert = `🚨 HYPERGLYCEMIA\nPatient: ${phone}\nReading: ${reading}\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ HIGH PRIORITY`;
   }
 
   if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
-    try {
-      await sendWhatsAppMessage(PHYSICIAN_PHONE, alert);
-      console.log('✅ Critical alert sent to physician');
-    } catch (err) {
-      console.error('❌ Alert failed:', err.message);
-    }
+    await sendWhatsAppMessage(PHYSICIAN_PHONE, alert);
+    console.log('✅ Doctor alerted');
   }
 
   return critical;
 }
 
-async function analyzeTrends(phone) {
-  const week = new Date();
-  week.setDate(week.getDate() - 7);
-
-  const readings = await GlucoseReading.find({
-    patientPhone: phone,
-    timestamp: { $gte: week }
-  });
-
-  if (readings.length < 3) return null;
-
-  const avg = readings.reduce((s, r) => s + r.reading, 0) / readings.length;
-  const high = readings.filter(r => r.reading > 180).length;
-  const low = readings.filter(r => r.reading < 70).length;
-
-  if (high > readings.length * 0.5) {
-    return `📊 7-Day Trend Alert:
-${high}/${readings.length} readings were high (>180 mg/dL)
-Average: ${avg.toFixed(0)} mg/dL
-
-💡 Recommendation: Review diet and medication with your doctor to improve control.`;
-  }
-  if (low > 2) {
-    return `📊 7-Day Trend Alert:
-${low} low glucose episodes (<70 mg/dL)
-Average: ${avg.toFixed(0)} mg/dL
-
-⚠️ Important: Discuss these lows with your doctor to prevent hypoglycemia.`;
-  }
-  return null;
-}
-
 // Webhooks
 app.get('/webhook', (req, res) => {
-  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('✅ Webhook verified');
-    return res.status(200).send(challenge);
+  if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+    console.log('✅ Webhook OK');
+    return res.status(200).send(req.query['hub.challenge']);
   }
   res.sendStatus(403);
 });
@@ -471,109 +234,66 @@ app.post('/webhook', async (req, res) => {
 
   try {
     const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!msg) return;
+    if (!msg || msg.type !== 'text') return;
 
     const from = msg.from;
-    const type = msg.type;
-    let userMsg = '';
+    const text = msg.text.body;
 
-    if (type === 'text') {
-      userMsg = msg.text.body;
-    } else if (type === 'audio') {
-      return await sendWhatsAppMessage(from, "I can't process voice notes yet. Please send your message as text. 😊");
-    } else {
-      return await sendWhatsAppMessage(from, "Please send text messages. 😊");
-    }
+    const reply = await analyzeWithClaude(from, text);
+    await sendWhatsAppMessage(from, reply);
 
-    let conv = await Conversation.findOne({ patientPhone: from });
-    if (!conv) conv = new Conversation({ patientPhone: from, messages: [] });
-
-    conv.messages.push({ role: 'user', content: userMsg });
-    if (conv.messages.length > 10) conv.messages = conv.messages.slice(-10);
-
-    const aiReply = await analyzeWithClaude(from, userMsg, conv.messages);
-
-    conv.messages.push({ role: 'assistant', content: aiReply });
-    conv.lastActive = new Date();
-    await conv.save();
-
-    await sendWhatsAppMessage(from, aiReply);
-
-    const data = extractGlucoseData(userMsg);
+    const data = extractGlucose(text);
     if (data.hasReading) {
       const reading = new GlucoseReading({
         patientPhone: from,
         reading: data.reading,
         readingType: data.readingType,
-        symptoms: data.symptoms,
         notes: data.notes
       });
-
       await reading.save();
-      console.log(`✅ Saved: ${data.reading} mg/dL (${data.readingType})`);
+      console.log(`✅ ${data.reading} (${data.readingType})`);
 
-      if (await checkCriticalLevels(data.reading, data.readingType, from)) {
+      if (await checkCritical(data.reading, data.readingType, from)) {
         reading.alertSent = true;
         await reading.save();
       }
-
-      const trend = await analyzeTrends(from);
-      if (trend) setTimeout(() => sendWhatsAppMessage(from, trend), 3000);
     }
-  } catch (err) {
-    console.error('❌ Webhook error:', err);
+  } catch (e) {
+    console.error('❌ Webhook:', e.message);
   }
 });
 
-// Health
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    service: 'Gluco Sahayak',
-    version: '3.0',
-    ai: isClaudeAvailable ? 'Claude 3.5 Sonnet (Anthropic)' : 'Fallback mode (fully functional)',
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'connecting',
-    timestamp: new Date().toISOString()
+    ai: isClaudeAvailable ? CLAUDE_MODEL : 'fallback',
+    db: mongoose.connection.readyState === 1 ? 'ok' : 'connecting'
   });
 });
 
 // Reminders
 cron.schedule('0 8 * * *', async () => {
-  console.log('⏰ Morning reminders');
   const patients = await Patient.find({ 'reminderPreferences.medication': true });
   for (const p of patients) {
-    try {
-      await sendWhatsAppMessage(p.phone, '🌅 Good morning! Time to take your medication and check your fasting glucose. Have a healthy day! 😊');
-    } catch (e) { console.error(`Failed: ${p.phone}`); }
+    await sendWhatsAppMessage(p.phone, '🌅 Morning! Take meds & check glucose 😊');
   }
 });
 
 cron.schedule('0 20 * * *', async () => {
-  console.log('⏰ Evening reminders');
   const patients = await Patient.find({ 'reminderPreferences.glucoseLogging': true });
   for (const p of patients) {
     const today = await GlucoseReading.findOne({
       patientPhone: p.phone,
-      timestamp: { $gte: new Date().setHours(0, 0, 0, 0) }
+      timestamp: { $gte: new Date().setHours(0,0,0,0) }
     });
-    if (!today) {
-      try {
-        await sendWhatsAppMessage(p.phone, "🌙 Evening reminder: Don't forget to log your glucose reading today! Just send: 'My sugar is [number]' 😊");
-      } catch (e) { console.error(`Failed: ${p.phone}`); }
-    }
+    if (!today) await sendWhatsAppMessage(p.phone, "🌙 Log glucose: 'My sugar is [number]' 😊");
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════╗
-║  GLUCO SAHAYAK v3.0                  ║
-║  Powered by Claude (Anthropic)       ║
-╠═══════════════════════════════════════╣
-║  Status: ✅ Running                   ║
-║  Port: ${PORT}                        ║
-║  AI: ${isClaudeAvailable ? '✅ Claude 3.5 Sonnet' : '⚠️  Fallback'}     ║
-║  DB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting'}               ║
-╚═══════════════════════════════════════╝
-  `);
-});
+app.listen(PORT, () => console.log(`
+╔═══════════════════════════╗
+║  GLUCO SAHAYAK v3.0      ║
+║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}            ║
+║  DB: ${mongoose.connection.readyState === 1 ? '✅' : '⏳'}                ║
+╚═══════════════════════════╝
+`));
