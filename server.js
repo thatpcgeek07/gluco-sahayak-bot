@@ -12,50 +12,52 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// DeepSeek Configuration
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
-let isDeepSeekAvailable = false;
+// Claude Configuration
+const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_VERSION = '2023-06-01';
+let isClaudeAvailable = false;
 
-// Test DeepSeek API on startup
-async function initializeDeepSeek() {
+// Test Claude API on startup
+async function initializeClaude() {
   try {
-    if (!DEEPSEEK_API_KEY || DEEPSEEK_API_KEY === 'your_deepseek_api_key_here') {
-      console.warn('⚠️  DeepSeek API key not configured - using fallback mode');
+    if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === 'your_anthropic_api_key_here') {
+      console.warn('⚠️  Claude API key not configured - using fallback mode');
       return false;
     }
 
     // Test API connection
     const response = await axios.post(
-      DEEPSEEK_API_URL,
+      CLAUDE_API_URL,
       {
-        model: 'deepseek-reasoner',
-        messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 50
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'Hi' }]
       },
       {
         headers: {
-          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-          'Content-Type': 'application/json'
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': CLAUDE_VERSION,
+          'content-type': 'application/json'
         }
       }
     );
 
-    if (response.data?.choices?.[0]?.message) {
-      isDeepSeekAvailable = true;
-      console.log('✅ DeepSeek R1 connected successfully');
+    if (response.data?.content?.[0]?.text) {
+      isClaudeAvailable = true;
+      console.log('✅ Claude (Anthropic) connected successfully');
       return true;
     }
   } catch (error) {
-    console.error('❌ DeepSeek initialization failed:', error.response?.data || error.message);
-    isDeepSeekAvailable = false;
+    console.error('❌ Claude initialization failed:', error.response?.data || error.message);
+    isClaudeAvailable = false;
     return false;
   }
 }
 
-initializeDeepSeek();
+initializeClaude();
 
 // MongoDB Schemas
 const patientSchema = new mongoose.Schema({
@@ -145,10 +147,9 @@ async function downloadWhatsAppMedia(mediaId) {
   }
 }
 
-// Note: DeepSeek doesn't support audio transcription natively
-// Would need a separate transcription service like OpenAI Whisper
+// Note: Would need separate transcription service for audio
 async function transcribeAudio(audioBuffer) {
-  console.warn('⚠️  Audio transcription not available with DeepSeek');
+  console.warn('⚠️  Audio transcription requires additional service');
   return null;
 }
 
@@ -280,72 +281,75 @@ How can I help?
 Just ask! 😊`;
 }
 
-// DeepSeek AI Integration
-async function analyzeWithDeepSeek(phone, message, history = []) {
-  if (isDeepSeekAvailable) {
+// Claude AI Integration
+async function analyzeWithClaude(phone, message, history = []) {
+  if (isClaudeAvailable) {
     try {
       const patient = await Patient.findOne({ phone });
       const readings = await GlucoseReading.find({ patientPhone: phone })
         .sort({ timestamp: -1 }).limit(5);
 
-      const systemPrompt = `You are Gluco Sahayak, a caring diabetes management assistant for patients in India.
+      const systemPrompt = `You are Gluco Sahayak, a caring and knowledgeable diabetes management assistant for patients in India.
 
 PATIENT CONTEXT:
 - Name: ${patient?.name || 'New patient'}
 - Recent glucose readings: ${readings.map(r => `${r.reading} mg/dL (${r.readingType})`).join(', ') || 'No previous readings'}
 
 MEDICAL GUIDELINES (CMR 2018, IDF 2021, WHO):
-- Fasting glucose: Normal <100, Prediabetes 100-125, Diabetes ≥126 mg/dL
-- Postprandial (2hr): Normal <140, Prediabetes 140-199, Diabetes ≥200 mg/dL
-- Critical levels: <70 (hypoglycemia - urgent!), >250 (severe hyperglycemia - urgent!)
-- HbA1c target: <7% for most adults
+- Fasting glucose: Normal <100 mg/dL, Prediabetes 100-125, Diabetes ≥126
+- Postprandial (2hr after eating): Normal <140, Prediabetes 140-199, Diabetes ≥200
+- Critical levels requiring immediate action: <70 (hypoglycemia) or >250 (severe hyperglycemia)
+- HbA1c target: <7% for most adults with diabetes
 
 YOUR ROLE:
-1. Log and analyze glucose readings when mentioned
-2. Provide evidence-based diet/lifestyle advice for Indian patients
-3. Be warm, supportive, and culturally sensitive
-4. Use Indian context: roti, dal, sabzi, walking, yoga
-5. If critical levels detected, strongly urge immediate medical attention
-6. Always clarify you provide guidance, not replace doctor consultation
+1. Acknowledge and log glucose readings when mentioned
+2. Provide evidence-based diet and lifestyle advice tailored for Indian patients
+3. Be warm, empathetic, supportive and culturally sensitive
+4. Use Indian dietary context: roti, dal, sabzi, rice, Indian fruits and vegetables
+5. Suggest locally appropriate exercises: walking, yoga (Surya namaskar, pranayama)
+6. For critical glucose levels (<70 or >250), provide urgent guidance and strongly recommend immediate medical attention
+7. Always clarify that you provide general guidance, not a replacement for doctor consultation
+8. Be encouraging and non-judgmental about glucose readings
+9. Provide practical, actionable advice
 
-RESPONSE STYLE:
-- Concise (max 150 words)
-- Empathetic and encouraging
-- Practical and actionable
-- Clear warnings for dangerous levels
+RESPONSE GUIDELINES:
+- Keep responses concise (maximum 150 words)
+- Be conversational and friendly
+- If glucose data is mentioned, acknowledge it and provide specific, relevant advice
+- For normal readings: praise and encourage continuation
+- For abnormal readings: explain concern clearly and give specific steps
+- Always end with supportive, encouraging note
 
 Current user message: "${message}"
 
-Respond naturally and helpfully:`;
+Respond in a helpful, caring manner:`;
 
       const response = await axios.post(
-        DEEPSEEK_API_URL,
+        CLAUDE_API_URL,
         {
-          model: 'deepseek-reasoner',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: message }
-          ],
-          max_tokens: 600,
-          temperature: 0.7
+          model: 'claude-3-5-sonnet-20241022',
+          max_tokens: 500,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: message }]
         },
         {
           headers: {
-            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-            'Content-Type': 'application/json'
+            'x-api-key': ANTHROPIC_API_KEY,
+            'anthropic-version': CLAUDE_VERSION,
+            'content-type': 'application/json'
           },
-          timeout: 10000 // 10 second timeout
+          timeout: 15000
         }
       );
 
-      const aiResponse = response.data?.choices?.[0]?.message?.content;
+      const aiResponse = response.data?.content?.[0]?.text;
       
       if (aiResponse && aiResponse.length > 10) {
-        console.log('✅ DeepSeek R1 response generated');
+        console.log('✅ Claude response generated');
         return aiResponse;
       }
     } catch (error) {
-      console.error('❌ DeepSeek error:', error.response?.data || error.message);
+      console.error('❌ Claude error:', error.response?.data || error.message);
       // Fall through to fallback
     }
   }
@@ -385,7 +389,7 @@ async function checkCriticalLevels(reading, type, phone) {
 
   if (reading < thresh.critical_low) {
     critical = true;
-    alert = `🚨 HYPOGLYCEMIA ALERT
+    alert = `🚨 CRITICAL: HYPOGLYCEMIA ALERT
 
 Patient: ${phone}
 Reading: ${reading} mg/dL
@@ -397,7 +401,7 @@ Patient needs urgent attention for dangerously low blood sugar!`;
     
   } else if (reading > thresh.critical_high) {
     critical = true;
-    alert = `🚨 HYPERGLYCEMIA ALERT
+    alert = `🚨 CRITICAL: HYPERGLYCEMIA ALERT
 
 Patient: ${phone}
 Reading: ${reading} mg/dL
@@ -476,7 +480,6 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') {
       userMsg = msg.text.body;
     } else if (type === 'audio') {
-      // DeepSeek doesn't support audio - ask user to send text
       return await sendWhatsAppMessage(from, "I can't process voice notes yet. Please send your message as text. 😊");
     } else {
       return await sendWhatsAppMessage(from, "Please send text messages. 😊");
@@ -488,7 +491,7 @@ app.post('/webhook', async (req, res) => {
     conv.messages.push({ role: 'user', content: userMsg });
     if (conv.messages.length > 10) conv.messages = conv.messages.slice(-10);
 
-    const aiReply = await analyzeWithDeepSeek(from, userMsg, conv.messages);
+    const aiReply = await analyzeWithClaude(from, userMsg, conv.messages);
 
     conv.messages.push({ role: 'assistant', content: aiReply });
     conv.lastActive = new Date();
@@ -528,7 +531,7 @@ app.get('/', (req, res) => {
     status: 'running',
     service: 'Gluco Sahayak',
     version: '3.0',
-    ai: isDeepSeekAvailable ? 'DeepSeek R1 (active)' : 'Fallback mode (fully functional)',
+    ai: isClaudeAvailable ? 'Claude 3.5 Sonnet (Anthropic)' : 'Fallback mode (fully functional)',
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'connecting',
     timestamp: new Date().toISOString()
   });
@@ -563,14 +566,14 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => {
   console.log(`
-╔═══════════════════════════════════╗
-║  GLUCO SAHAYAK v3.0              ║
-║  Powered by DeepSeek R1          ║
-╠═══════════════════════════════════╣
-║  Status: ✅ Running               ║
-║  Port: ${PORT}                    ║
-║  AI: ${isDeepSeekAvailable ? '✅ DeepSeek R1' : '⚠️  Fallback'}        ║
-║  DB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting'}           ║
-╚═══════════════════════════════════╝
+╔═══════════════════════════════════════╗
+║  GLUCO SAHAYAK v3.0                  ║
+║  Powered by Claude (Anthropic)       ║
+╠═══════════════════════════════════════╣
+║  Status: ✅ Running                   ║
+║  Port: ${PORT}                        ║
+║  AI: ${isClaudeAvailable ? '✅ Claude 3.5 Sonnet' : '⚠️  Fallback'}     ║
+║  DB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting'}               ║
+╚═══════════════════════════════════════╝
   `);
 });
