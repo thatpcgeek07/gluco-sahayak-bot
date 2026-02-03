@@ -15,9 +15,9 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// Claude - Use claude-3-5-sonnet-latest or claude-3-sonnet-20240229
+// Claude Sonnet 4
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_MODEL = 'claude-3-5-sonnet-latest'; // This will always use latest
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514'; // Latest Sonnet 4
 let isClaudeAvailable = false;
 
 async function initializeClaude() {
@@ -42,7 +42,7 @@ async function initializeClaude() {
 
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
-      console.log(`✅ Claude connected (${CLAUDE_MODEL})`);
+      console.log(`✅ Claude Sonnet 4 connected!`);
       return true;
     }
   } catch (error) {
@@ -177,11 +177,11 @@ User: "${msg}"`;
 
     const text = response.data?.content?.[0]?.text;
     if (text) {
-      console.log('✅ Claude response');
+      console.log('✅ Claude Sonnet 4 response');
       return text;
     }
   } catch (e) {
-    console.error('❌ Claude error');
+    console.error('❌ Claude error:', e.response?.data?.error?.message || e.message);
   }
   
   return fallbackResponse(msg);
@@ -266,7 +266,7 @@ app.post('/webhook', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    ai: isClaudeAvailable ? CLAUDE_MODEL : 'fallback',
+    ai: isClaudeAvailable ? 'Claude Sonnet 4' : 'fallback',
     db: mongoose.connection.readyState === 1 ? 'ok' : 'connecting'
   });
 });
@@ -291,9 +291,9 @@ cron.schedule('0 20 * * *', async () => {
 });
 
 app.listen(PORT, () => console.log(`
-╔═══════════════════════════╗
-║  GLUCO SAHAYAK v3.0      ║
-║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}            ║
-║  DB: ${mongoose.connection.readyState === 1 ? '✅' : '⏳'}                ║
-╚═══════════════════════════╝
+╔════════════════════════════╗
+║  GLUCO SAHAYAK v3.0       ║
+║  Claude Sonnet 4: ${isClaudeAvailable ? '✅' : '⚠️ '}     ║
+║  DB: ${mongoose.connection.readyState === 1 ? '✅' : '⏳'}                 ║
+╚════════════════════════════╝
 `));
