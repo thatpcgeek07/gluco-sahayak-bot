@@ -16,24 +16,60 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// Initialize Gemini AI with error handling
+// Initialize Gemini AI - automatically tries latest models first
 let genAI;
 let isGeminiAvailable = false;
+let currentModel = null;
 
-try {
-  if (GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here') {
+// Model priority list - tries newest first, falls back to older
+const MODEL_PRIORITY = [
+  'gemini-2.0-flash-exp',     // Latest experimental (Feb 2025)
+  'gemini-2.0-flash',         // Stable 2.0
+  'gemini-1.5-flash-latest',  // Latest 1.5
+  'gemini-1.5-flash',         // Stable 1.5
+  'gemini-pro'                // Legacy fallback
+];
+
+async function initializeGemini() {
+  try {
+    if (!GEMINI_API_KEY || GEMINI_API_KEY === 'your_gemini_api_key_here') {
+      console.warn('⚠️  Gemini API key not configured - using fallback mode');
+      return false;
+    }
+
     genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    isGeminiAvailable = true;
-    console.log('✅ Gemini AI initialized successfully');
-  } else {
-    console.warn('⚠️ Gemini API key not configured - using fallback mode');
+    
+    // Try each model until one works
+    for (const modelName of MODEL_PRIORITY) {
+      try {
+        console.log(`🔄 Testing ${modelName}...`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const testResult = await model.generateContent("Hi");
+        
+        if (testResult?.response) {
+          currentModel = modelName;
+          isGeminiAvailable = true;
+          console.log(`✅ Connected to ${modelName}`);
+          return true;
+        }
+      } catch (error) {
+        console.log(`⚠️  ${modelName} unavailable: ${error.message}`);
+        continue;
+      }
+    }
+    
+    console.error('❌ All Gemini models failed - using fallback');
+    return false;
+    
+  } catch (error) {
+    console.error('❌ Gemini init error:', error.message);
+    return false;
   }
-} catch (error) {
-  console.error('❌ Failed to initialize Gemini AI:', error.message);
-  isGeminiAvailable = false;
 }
 
-// MongoDB Schemas (same as before)
+initializeGemini();
+
+// MongoDB Schemas
 const patientSchema = new mongoose.Schema({
   phone: { type: String, required: true, unique: true },
   name: String,
@@ -48,8 +84,7 @@ const patientSchema = new mongoose.Schema({
   }],
   reminderPreferences: {
     glucoseLogging: { type: Boolean, default: true },
-    medication: { type: Boolean, default: true },
-    preferredTimes: [String]
+    medication: { type: Boolean, default: true }
   }
 });
 
@@ -77,680 +112,436 @@ const Patient = mongoose.model('Patient', patientSchema);
 const GlucoseReading = mongoose.model('GlucoseReading', glucoseReadingSchema);
 const Conversation = mongoose.model('Conversation', conversationSchema);
 
-// Connect to MongoDB
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+mongoose.connect(MONGODB_URI).then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
 
-// Medical Guidelines Constants
+// Medical Thresholds (CMR Guidelines 2018, IDF Atlas 2021, WHO)
 const MEDICAL_THRESHOLDS = {
-  fasting: {
-    normal: { min: 70, max: 100 },
-    prediabetes: { min: 100, max: 125 },
-    diabetes: { min: 126, max: 300 },
-    critical_low: 70,
-    critical_high: 250
-  },
-  postprandial: {
-    normal: { min: 70, max: 140 },
-    prediabetes: { min: 140, max: 199 },
-    diabetes: { min: 200, max: 300 },
-    critical_low: 70,
-    critical_high: 300
-  },
-  random: {
-    critical_low: 70,
-    critical_high: 250
-  }
+  fasting: { normal: { max: 100 }, diabetes: { min: 126 }, critical_low: 70, critical_high: 250 },
+  postprandial: { normal: { max: 140 }, diabetes: { min: 200 }, critical_low: 70, critical_high: 300 },
+  random: { critical_low: 70, critical_high: 250 }
 };
 
-// Enhanced System Prompt
-const SYSTEM_PROMPT = `You are "Gluco Sahayak", an AI diabetes management assistant for patients in India.
-
-CORE RESPONSIBILITIES:
-1. Log glucose readings and symptoms
-2. Provide evidence-based diet/lifestyle advice
-3. Support Hindi, Tamil, Telugu, Bengali, and other Indian languages
-4. Be empathetic and culturally sensitive
-
-MEDICAL KNOWLEDGE:
-- Fasting: Normal <100, Prediabetes 100-125, Diabetes ≥126 mg/dL
-- Postprandial: Normal <140, Prediabetes 140-199, Diabetes ≥200 mg/dL
-- Critical: <70 (hypo) or >250 (hyper) requires immediate attention
-
-RESPONSE STYLE:
-- Concise and practical
-- Suggest Indian foods (roti, dal, sabzi, fruits)
-- Recommend local exercises
-- Always clarify you're providing guidance, not replacing doctor visits
-- Extract glucose data when mentioned
-
-IMPORTANT:
-- Never diagnose
-- Recommend doctor consultation for treatment changes
-- Be supportive and non-judgmental`;
-
-// Helper Functions
+// WhatsApp Functions
 async function sendWhatsAppMessage(to, message) {
   try {
-    await axios({
-      method: 'POST',
-      url: `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`,
-      headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      data: {
-        messaging_product: 'whatsapp',
-        to: to,
-        type: 'text',
-        text: { body: message }
-      }
+    await axios.post(`https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: message }
+    }, {
+      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` }
     });
-    console.log(`✅ Message sent to ${to}`);
+    console.log(`✅ Sent to ${to}`);
   } catch (error) {
-    console.error('❌ Error sending WhatsApp message:', error.response?.data || error.message);
-    throw error;
+    console.error('❌ Send error:', error.response?.data || error.message);
   }
 }
 
 async function downloadWhatsAppMedia(mediaId) {
   try {
-    const mediaUrlResponse = await axios({
-      method: 'GET',
-      url: `https://graph.facebook.com/v18.0/${mediaId}`,
-      headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`
-      }
+    const { data } = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}`, {
+      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` }
     });
-
-    const mediaUrl = mediaUrlResponse.data.url;
-
-    const mediaResponse = await axios({
-      method: 'GET',
-      url: mediaUrl,
-      headers: {
-        'Authorization': `Bearer ${WHATSAPP_TOKEN}`
-      },
+    
+    const mediaResponse = await axios.get(data.url, {
+      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` },
       responseType: 'arraybuffer'
     });
-
+    
     return Buffer.from(mediaResponse.data);
   } catch (error) {
-    console.error('❌ Error downloading media:', error.message);
+    console.error('❌ Media download failed:', error.message);
     return null;
   }
 }
 
 async function transcribeAudio(audioBuffer) {
-  if (!isGeminiAvailable) {
-    console.warn('⚠️ Gemini not available for transcription');
-    return null;
-  }
-
+  if (!isGeminiAvailable) return null;
+  
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-    
-    const audioPart = {
-      inlineData: {
-        data: audioBuffer.toString('base64'),
-        mimeType: 'audio/ogg'
-      }
-    };
-
+    const model = genAI.getGenerativeModel({ model: currentModel });
     const result = await model.generateContent([
-      "Transcribe this audio message about blood sugar levels or diabetes. Provide only the transcription.",
-      audioPart
+      "Transcribe this audio about diabetes/blood sugar. Return only transcription.",
+      { inlineData: { data: audioBuffer.toString('base64'), mimeType: 'audio/ogg' } }
     ]);
-
     return result.response.text();
   } catch (error) {
-    console.error('❌ Transcription error:', error.message);
+    console.error('❌ Transcription failed:', error.message);
     return null;
   }
 }
 
-// Fallback response generator (when Gemini is unavailable)
-function generateFallbackResponse(message) {
-  const lowerMsg = message.toLowerCase();
-  
-  // Extract glucose reading
+// Smart Fallback System
+function generateSmartResponse(message) {
+  const lower = message.toLowerCase();
   const glucoseMatch = message.match(/(\d{2,3})/);
-  const glucoseValue = glucoseMatch ? parseInt(glucoseMatch[1]) : null;
+  const glucose = glucoseMatch ? parseInt(glucoseMatch[1]) : null;
   
-  // Check for greetings
-  if (lowerMsg.includes('hi') || lowerMsg.includes('hello') || lowerMsg.includes('namaste') || lowerMsg.includes('नमस्ते')) {
-    return `Hello! 🙏 I'm Gluco Sahayak, your diabetes management assistant.
+  // Greetings
+  if (lower.match(/^(hi|hello|hey|namaste|नमस्ते)/)) {
+    return `Hello! 🙏 I'm Gluco Sahayak, your diabetes assistant.
 
-I can help you:
-✅ Log glucose readings
-✅ Track your trends
-✅ Get diet & exercise tips
-✅ Receive medication reminders
+I help with:
+📊 Glucose logging
+🍽️ Diet advice
+🚶 Exercise tips
+💊 Medication reminders
 
-Just send me your glucose reading like "My sugar is 120" or ask any diabetes-related question!`;
+Send: "My sugar is 120" or ask anything! 😊`;
   }
   
-  // Handle glucose readings
-  if (glucoseValue && glucoseValue >= 40 && glucoseValue <= 500) {
-    let response = `📊 I've logged your glucose reading: ${glucoseValue} mg/dL\n\n`;
+  // Glucose readings
+  if (glucose && glucose >= 40 && glucose <= 500) {
+    let response = `✅ Logged: ${glucose} mg/dL\n\n`;
     
-    if (glucoseValue < 70) {
-      response += `⚠️ This is LOW (hypoglycemia)!
+    if (glucose < 70) {
+      response += `🚨 LOW! (Hypoglycemia)
 
-IMMEDIATE ACTION:
-• Eat 15g fast-acting carbs (3-4 glucose tablets, 1/2 cup juice, or 1 tbsp honey)
-• Rest 15 minutes
-• Recheck glucose
+DO NOW:
+• Eat 15g fast carbs (juice/honey/glucose tablets)
+• Rest 15 min
+• Recheck
 • If still low, repeat
 
-🚨 If symptoms persist, seek medical help immediately!`;
-    } else if (glucoseValue >= 70 && glucoseValue <= 140) {
-      response += `✅ This is in the NORMAL range!
+Get help if worse! 🏥`;
+    } else if (glucose <= 100) {
+      response += `✅ EXCELLENT! Normal range.
 
-Keep up the good work:
-• Continue balanced diet (roti, dal, sabzi)
-• Stay active (30 min walk daily)
-• Take medications as prescribed
-• Log regularly`;
-    } else if (glucoseValue > 140 && glucoseValue <= 200) {
-      response += `⚠️ This is ELEVATED
+Keep it up:
+• Healthy eating
+• Stay active
+• Take meds
+Great job! 👏`;
+    } else if (glucose <= 125) {
+      response += `⚠️ PREDIABETES range
 
-Tips to improve:
-• Choose whole grain roti over rice
-• Add more vegetables (karela, methi, palak)
-• Avoid sugary foods & drinks
-• Walk 30 minutes after meals
-• Check with your doctor if consistently high`;
-    } else if (glucoseValue > 200) {
-      response += `🚨 This is HIGH!
+Improve:
+• More vegetables
+• Daily walk 30min
+• Less rice/sweets
+• See doctor`;
+    } else if (glucose <= 180) {
+      response += `⚠️ ELEVATED
 
-IMPORTANT STEPS:
-• Drink plenty of water
-• Avoid sugary foods completely
-• Check if you took your medication
-• Monitor symptoms (thirst, frequent urination)
-• Contact your doctor if remains high
+Action:
+• Review diet
+• Exercise daily
+• Check medication
+• Monitor closely`;
+    } else if (glucose <= 250) {
+      response += `🚨 HIGH!
 
-${glucoseValue > 250 ? '⚠️ CRITICAL LEVEL - Seek medical attention if you feel unwell!' : ''}`;
+Steps:
+• Drink water
+• No sweets
+• Walk 15min
+• Recheck in 2hr
+• Call doctor if stays high`;
+    } else {
+      response += `🚨🚨 CRITICAL HIGH!
+
+URGENT:
+• Contact doctor NOW
+• Drink water
+• DON'T exercise
+• Watch for nausea/confusion
+• Go to ER if very sick! 🏥`;
     }
-    
     return response;
   }
   
-  // Diet questions
-  if (lowerMsg.includes('eat') || lowerMsg.includes('food') || lowerMsg.includes('diet') || lowerMsg.includes('breakfast') || lowerMsg.includes('lunch') || lowerMsg.includes('dinner')) {
-    return `🍽️ Diabetes-Friendly Diet Tips:
+  // Diet
+  if (lower.match(/eat|food|diet|breakfast|lunch|dinner/)) {
+    return `🍽️ Diabetes Diet
 
-BREAKFAST:
-• Oats upma + boiled egg
-• Moong dal cheela + curd
-• Ragi porridge + nuts
-
-LUNCH:
-• 2 wheat rotis
-• Dal (moong/masoor)
-• Sabzi (palak, beans, karela)
-• Salad
-• Small bowl curd
-
-DINNER:
-• Similar to lunch but lighter
-• Avoid rice at night
-• Early dinner (before 8 PM)
-
-SNACKS:
-• Roasted chana
-• Fruits (apple, guava, papaya)
-• Nuts (almonds, walnuts)
-• Buttermilk
+MEALS:
+• Breakfast: Oats/upma + egg/paneer
+• Lunch: Roti + dal + vegetables + salad
+• Dinner: Light, early (before 8pm)
+• Snacks: Nuts, fruits, roasted chana
 
 AVOID:
-• White rice, maida
-• Sweets, biscuits
-• Sugary drinks
-• Fried foods`;
+❌ White rice, sweets, fried foods, sugary drinks
+
+CHOOSE:
+✅ Vegetables, whole grains, protein, water
+
+Portion control is key! 💪`;
   }
   
-  // Exercise questions
-  if (lowerMsg.includes('exercise') || lowerMsg.includes('walk') || lowerMsg.includes('yoga')) {
-    return `🚶 Exercise Guidelines for Diabetes:
+  // Exercise
+  if (lower.match(/exercise|walk|yoga/)) {
+    return `🚶 Exercise Guide
 
-DAILY ACTIVITIES:
-• Walk 30-45 minutes (morning/evening)
-• Break it into 2-3 short walks if needed
-• Walk after meals helps control sugar
+DAILY:
+• Walk 30-45 min
+• After meals: 15-20 min
+• Yoga: Surya namaskar, pranayama
 
-YOGA:
-• Surya Namaskar (5-10 rounds)
-• Pranayama (deep breathing)
-• Bhujangasana, Dhanurasana
-• Shavasana for relaxation
+SAFETY:
+⚠️ Check glucose first
+⚠️ Don't exercise if >250
+⚠️ Carry glucose tablets
+⚠️ Stay hydrated
 
-PRECAUTIONS:
-• Check glucose before exercise
-• Avoid if glucose >250 mg/dL
-• Stay hydrated
-• Wear comfortable shoes
-• Stop if dizzy or unwell
-
-Best time: 1-2 hours after meals`;
+Best time: 1-2hr after meals 💪`;
   }
   
-  // Medication questions
-  if (lowerMsg.includes('medicine') || lowerMsg.includes('medication') || lowerMsg.includes('tablet') || lowerMsg.includes('insulin')) {
-    return `💊 Medication Reminders:
+  // Default
+  return `Got it: "${message}"
 
-IMPORTANT:
-• Take medicines as prescribed by your doctor
-• Don't skip or change doses yourself
-• Take at the same time daily
-• With or without food as directed
+How can I help?
+📊 "My sugar is 120"
+🍽️ "What to eat?"
+🚶 "Exercise tips?"
+💊 "Set reminder"
 
-COMMON TIMES:
-• Morning (before/after breakfast)
-• Evening (before dinner)
-• Bedtime
-
-I can remind you! Just tell me your medication schedule.
-
-⚠️ Never stop medications without consulting your doctor.`;
-  }
-  
-  // Symptoms
-  if (lowerMsg.includes('tired') || lowerMsg.includes('dizzy') || lowerMsg.includes('thirsty') || lowerMsg.includes('symptom')) {
-    return `⚠️ Common Diabetes Symptoms:
-
-HIGH SUGAR (Hyperglycemia):
-• Excessive thirst
-• Frequent urination
-• Blurred vision
-• Fatigue
-• Headache
-
-LOW SUGAR (Hypoglycemia):
-• Dizziness, shakiness
-• Sweating
-• Confusion
-• Hunger
-• Weakness
-
-🚨 If you're experiencing severe symptoms, please contact your doctor or seek immediate medical attention.
-
-Meanwhile, please send me your current glucose reading.`;
-  }
-  
-  // Default response
-  return `I received your message: "${message}"
-
-I'm here to help with:
-📊 Logging glucose readings
-🍽️ Diet recommendations
-🚶 Exercise tips
-💊 Medication reminders
-❓ Diabetes questions
-
-You can:
-• Send your glucose reading: "My sugar is 120"
-• Ask about food: "What should I eat?"
-• Ask about exercise: "What exercise is good?"
-• Report symptoms: "I'm feeling tired"
-
-How can I assist you today?`;
+Just ask! 😊`;
 }
 
-async function analyzeWithGemini(patientPhone, userMessage, conversationHistory = []) {
-  // Try Gemini first
+async function analyzeWithGemini(phone, message, history = []) {
   if (isGeminiAvailable) {
     try {
       const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash",
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 500,
-        }
+        model: currentModel,
+        generationConfig: { temperature: 0.7, maxOutputTokens: 400 }
       });
 
-      const patient = await Patient.findOne({ phone: patientPhone });
-      const recentReadings = await GlucoseReading.find({ patientPhone })
-        .sort({ timestamp: -1 })
-        .limit(5);
+      const patient = await Patient.findOne({ phone });
+      const readings = await GlucoseReading.find({ patientPhone: phone })
+        .sort({ timestamp: -1 }).limit(5);
 
-      const contextPrompt = `
-PATIENT CONTEXT:
-${patient ? `Name: ${patient.name || 'Not set'}, Age: ${patient.age || 'Not set'}` : 'New patient'}
+      const prompt = `You are Gluco Sahayak, a caring diabetes assistant for Indian patients.
 
-RECENT READINGS:
-${recentReadings.length > 0 ? recentReadings.map(r => `${r.reading} mg/dL (${r.readingType})`).join(', ') : 'None'}
+Context:
+- Patient: ${patient?.name || 'New'}
+- Recent readings: ${readings.map(r => `${r.reading}mg/dL`).join(', ') || 'None'}
 
-USER MESSAGE: ${userMessage}
+User: "${message}"
 
-Provide a helpful, concise response (max 200 words). If glucose data is mentioned, acknowledge it and give relevant advice.`;
+Respond (max 120 words):
+- Warm and supportive
+- If glucose mentioned: acknowledge, advise per guidelines
+- Indian context (roti, dal, walking)
+- Normal fasting <100, critical <70 or >250
+- Encourage healthy habits`;
 
-      const result = await model.generateContent([SYSTEM_PROMPT, contextPrompt]);
-      const response = result.response.text();
+      const result = await model.generateContent(prompt);
+      const text = await result.response.text();
       
-      console.log('✅ Gemini response generated');
-      return response;
-      
-    } catch (error) {
-      console.error('❌ Gemini error, using fallback:', error.message);
-      // Fall through to fallback
+      if (text?.length > 10) {
+        console.log(`✅ Gemini (${currentModel})`);
+        return text;
+      }
+    } catch (err) {
+      console.error('❌ Gemini error:', err.message);
     }
   }
   
-  // Use fallback
-  console.log('ℹ️ Using fallback response generator');
-  return generateFallbackResponse(userMessage);
+  console.log('ℹ️ Using fallback');
+  return generateSmartResponse(message);
 }
 
-async function extractGlucoseData(message, aiResponse) {
-  // Simple regex-based extraction
-  const glucoseMatch = message.match(/(\d{2,3})/);
-  const glucoseValue = glucoseMatch ? parseInt(glucoseMatch[1]) : null;
+function extractGlucoseData(message) {
+  const match = message.match(/(\d{2,3})/);
+  const reading = match ? parseInt(match[1]) : null;
   
-  if (!glucoseValue || glucoseValue < 40 || glucoseValue > 500) {
-    return { hasReading: false };
-  }
+  if (!reading || reading < 40 || reading > 500) return { hasReading: false };
 
-  // Determine reading type
-  let readingType = 'random';
-  const lowerMsg = message.toLowerCase();
-  
-  if (lowerMsg.includes('fasting') || lowerMsg.includes('empty stomach') || lowerMsg.includes('morning')) {
-    readingType = 'fasting';
-  } else if (lowerMsg.includes('after') || lowerMsg.includes('post') || lowerMsg.includes('lunch') || lowerMsg.includes('dinner')) {
-    readingType = 'postprandial';
-  }
+  const lower = message.toLowerCase();
+  const readingType = lower.match(/fasting|empty|morning/) ? 'fasting' :
+                       lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
 
-  // Extract symptoms
   const symptoms = [];
-  const symptomKeywords = ['tired', 'dizzy', 'thirsty', 'headache', 'blurred', 'sweating', 'weak'];
-  symptomKeywords.forEach(symptom => {
-    if (lowerMsg.includes(symptom)) symptoms.push(symptom);
+  ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
+    if (lower.includes(s)) symptoms.push(s);
   });
 
   return {
     hasReading: true,
-    reading: glucoseValue,
-    readingType: readingType,
-    symptoms: symptoms,
+    reading,
+    readingType,
+    symptoms,
     notes: message.substring(0, 200)
   };
 }
 
-async function checkCriticalLevels(reading, readingType, patientPhone) {
-  const thresholds = MEDICAL_THRESHOLDS[readingType] || MEDICAL_THRESHOLDS.random;
-  
-  let isCritical = false;
-  let alertMessage = '';
+async function checkCriticalLevels(reading, type, phone) {
+  const thresh = MEDICAL_THRESHOLDS[type] || MEDICAL_THRESHOLDS.random;
+  let critical = false;
+  let alert = '';
 
-  if (reading < thresholds.critical_low) {
-    isCritical = true;
-    alertMessage = `🚨 CRITICAL HYPOGLYCEMIA ALERT
-Patient: ${patientPhone}
-Reading: ${reading} mg/dL
-Time: ${new Date().toLocaleString('en-IN')}
-Status: IMMEDIATE ACTION REQUIRED`;
-  } else if (reading > thresholds.critical_high) {
-    isCritical = true;
-    alertMessage = `🚨 CRITICAL HYPERGLYCEMIA ALERT
-Patient: ${patientPhone}
-Reading: ${reading} mg/dL
-Time: ${new Date().toLocaleString('en-IN')}
-Status: MEDICAL ATTENTION NEEDED`;
+  if (reading < thresh.critical_low) {
+    critical = true;
+    alert = `🚨 HYPOGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ URGENT ACTION NEEDED`;
+  } else if (reading > thresh.critical_high) {
+    critical = true;
+    alert = `🚨 HYPERGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ MEDICAL ATTENTION NEEDED`;
   }
 
-  if (isCritical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
+  if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
     try {
-      await sendWhatsAppMessage(PHYSICIAN_PHONE, alertMessage);
-      console.log('✅ Physician alert sent');
-    } catch (error) {
-      console.error('❌ Failed to send physician alert:', error.message);
+      await sendWhatsAppMessage(PHYSICIAN_PHONE, alert);
+      console.log('✅ Doctor alerted');
+    } catch (err) {
+      console.error('❌ Alert failed:', err.message);
     }
   }
 
-  return isCritical;
+  return critical;
 }
 
-async function analyzeTrends(patientPhone) {
-  const last7Days = new Date();
-  last7Days.setDate(last7Days.getDate() - 7);
+async function analyzeTrends(phone) {
+  const week = new Date();
+  week.setDate(week.getDate() - 7);
 
   const readings = await GlucoseReading.find({
-    patientPhone,
-    timestamp: { $gte: last7Days }
-  }).sort({ timestamp: -1 });
+    patientPhone: phone,
+    timestamp: { $gte: week }
+  });
 
   if (readings.length < 3) return null;
 
-  const avgReading = readings.reduce((sum, r) => sum + r.reading, 0) / readings.length;
-  const highReadings = readings.filter(r => r.reading > 180).length;
-  const lowReadings = readings.filter(r => r.reading < 70).length;
+  const avg = readings.reduce((s, r) => s + r.reading, 0) / readings.length;
+  const high = readings.filter(r => r.reading > 180).length;
+  const low = readings.filter(r => r.reading < 70).length;
 
-  if (highReadings > readings.length * 0.5) {
-    return `📊 Weekly Trend: ${highReadings}/${readings.length} readings were high (>180). Average: ${avgReading.toFixed(0)}. Consider reviewing diet and medication with your doctor.`;
-  } else if (lowReadings > 2) {
-    return `📊 Weekly Trend: ${lowReadings} low readings this week. Please discuss this pattern with your doctor to prevent hypoglycemia.`;
+  if (high > readings.length * 0.5) {
+    return `📊 Week: ${high}/${readings.length} high (>180). Avg: ${avg.toFixed(0)}\n💡 Review diet with doctor`;
   }
-
+  if (low > 2) {
+    return `📊 Week: ${low} lows (<70). Avg: ${avg.toFixed(0)}\n⚠️ Discuss with doctor`;
+  }
   return null;
 }
 
-// Webhook verification
+// Webhooks
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
+  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('✅ Webhook verified');
-    res.status(200).send(challenge);
-  } else {
-    console.log('❌ Webhook verification failed');
-    res.sendStatus(403);
+    return res.status(200).send(challenge);
   }
+  res.sendStatus(403);
 });
 
-// Webhook message handler
 app.post('/webhook', async (req, res) => {
-  // Respond immediately to avoid timeout
   res.sendStatus(200);
 
   try {
-    const body = req.body;
-    console.log('📨 Webhook received:', JSON.stringify(body, null, 2));
+    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return;
 
-    if (body.object === 'whatsapp_business_account') {
-      const changes = body.entry?.[0]?.changes?.[0];
-      const value = changes?.value;
+    const from = msg.from;
+    const type = msg.type;
+    let userMsg = '';
 
-      if (value?.messages?.[0]) {
-        const message = value.messages[0];
-        const from = message.from;
-        const messageType = message.type;
-
-        console.log(`📱 Message from ${from}, type: ${messageType}`);
-
-        let userMessage = '';
-
-        // Handle different message types
-        if (messageType === 'text') {
-          userMessage = message.text.body;
-          console.log(`💬 Text message: ${userMessage}`);
-        } else if (messageType === 'audio') {
-          try {
-            const audioBuffer = await downloadWhatsAppMedia(message.audio.id);
-            if (audioBuffer) {
-              const transcription = await transcribeAudio(audioBuffer);
-              if (transcription) {
-                userMessage = transcription;
-                await sendWhatsAppMessage(from, `🎤 I heard: "${transcription}"`);
-              } else {
-                await sendWhatsAppMessage(from, "Sorry, I couldn't transcribe your voice note. Please send a text message instead.");
-                return;
-              }
-            }
-          } catch (error) {
-            console.error('❌ Audio processing error:', error);
-            await sendWhatsAppMessage(from, "Sorry, I had trouble processing your voice note. Please try sending a text message.");
-            return;
-          }
+    if (type === 'text') {
+      userMsg = msg.text.body;
+    } else if (type === 'audio') {
+      const audio = await downloadWhatsAppMedia(msg.audio.id);
+      if (audio) {
+        const text = await transcribeAudio(audio);
+        if (text) {
+          userMsg = text;
+          await sendWhatsAppMessage(from, `🎤 "${text}"`);
         } else {
-          await sendWhatsAppMessage(from, "I support text and voice messages. Please send your message as text or voice note. 😊");
-          return;
-        }
-
-        // Get or create conversation
-        let conversation = await Conversation.findOne({ patientPhone: from });
-        if (!conversation) {
-          conversation = new Conversation({ patientPhone: from, messages: [] });
-        }
-
-        // Add user message
-        conversation.messages.push({
-          role: 'user',
-          content: userMessage,
-          timestamp: new Date()
-        });
-
-        // Keep last 10 messages
-        if (conversation.messages.length > 10) {
-          conversation.messages = conversation.messages.slice(-10);
-        }
-
-        // Get AI response with retry logic
-        let aiResponse;
-        let retries = 0;
-        const maxRetries = 2;
-        
-        while (retries <= maxRetries) {
-          try {
-            aiResponse = await analyzeWithGemini(from, userMessage, conversation.messages);
-            break;
-          } catch (error) {
-            retries++;
-            console.error(`❌ Attempt ${retries} failed:`, error.message);
-            if (retries > maxRetries) {
-              aiResponse = generateFallbackResponse(userMessage);
-            } else {
-              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
-            }
-          }
-        }
-
-        // Add AI response to history
-        conversation.messages.push({
-          role: 'assistant',
-          content: aiResponse,
-          timestamp: new Date()
-        });
-
-        conversation.lastActive = new Date();
-        await conversation.save();
-
-        // Send response
-        await sendWhatsAppMessage(from, aiResponse);
-
-        // Extract and save glucose data
-        const glucoseData = await extractGlucoseData(userMessage, aiResponse);
-        
-        if (glucoseData.hasReading && glucoseData.reading) {
-          const reading = new GlucoseReading({
-            patientPhone: from,
-            reading: glucoseData.reading,
-            readingType: glucoseData.readingType || 'random',
-            symptoms: glucoseData.symptoms || [],
-            notes: glucoseData.notes
-          });
-
-          await reading.save();
-          console.log(`✅ Glucose reading saved: ${glucoseData.reading} mg/dL`);
-
-          // Check for critical levels
-          const isCritical = await checkCriticalLevels(
-            glucoseData.reading,
-            glucoseData.readingType || 'random',
-            from
-          );
-
-          if (isCritical) {
-            reading.alertSent = true;
-            await reading.save();
-          }
-
-          // Send trend analysis
-          const trendMessage = await analyzeTrends(from);
-          if (trendMessage) {
-            setTimeout(() => sendWhatsAppMessage(from, trendMessage), 3000);
-          }
+          return await sendWhatsAppMessage(from, "Couldn't transcribe. Please text instead 😊");
         }
       }
+    } else {
+      return await sendWhatsAppMessage(from, "Send text or voice 😊");
     }
-  } catch (error) {
-    console.error('❌ Webhook processing error:', error);
+
+    let conv = await Conversation.findOne({ patientPhone: from });
+    if (!conv) conv = new Conversation({ patientPhone: from, messages: [] });
+
+    conv.messages.push({ role: 'user', content: userMsg });
+    if (conv.messages.length > 10) conv.messages = conv.messages.slice(-10);
+
+    const aiReply = await analyzeWithGemini(from, userMsg, conv.messages);
+
+    conv.messages.push({ role: 'assistant', content: aiReply });
+    conv.lastActive = new Date();
+    await conv.save();
+
+    await sendWhatsAppMessage(from, aiReply);
+
+    const data = extractGlucoseData(userMsg);
+    if (data.hasReading) {
+      const reading = new GlucoseReading({
+        patientPhone: from,
+        reading: data.reading,
+        readingType: data.readingType,
+        symptoms: data.symptoms,
+        notes: data.notes
+      });
+
+      await reading.save();
+      console.log(`✅ ${data.reading} mg/dL (${data.readingType})`);
+
+      if (await checkCriticalLevels(data.reading, data.readingType, from)) {
+        reading.alertSent = true;
+        await reading.save();
+      }
+
+      const trend = await analyzeTrends(from);
+      if (trend) setTimeout(() => sendWhatsAppMessage(from, trend), 3000);
+    }
+  } catch (err) {
+    console.error('❌ Webhook error:', err);
   }
 });
 
-// Health check
+// Health
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    service: 'Gluco Sahayak Bot',
-    gemini: isGeminiAvailable ? 'available' : 'fallback mode',
-    timestamp: new Date().toISOString()
+    service: 'Gluco Sahayak',
+    version: '2.2',
+    gemini: isGeminiAvailable ? currentModel : 'fallback (fully functional)',
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'connecting'
   });
 });
 
-// Scheduled reminders
+// Reminders
 cron.schedule('0 8 * * *', async () => {
-  console.log('⏰ Running morning reminders...');
+  console.log('⏰ Morning reminders');
   const patients = await Patient.find({ 'reminderPreferences.medication': true });
-  
-  for (const patient of patients) {
+  for (const p of patients) {
     try {
-      const message = `🌅 Good morning!
-
-Time to:
-✅ Take your morning medication
-📊 Check your fasting glucose
-💧 Drink water
-
-Have a healthy day! 😊`;
-      
-      await sendWhatsAppMessage(patient.phone, message);
-    } catch (error) {
-      console.error(`❌ Failed to send reminder to ${patient.phone}`);
-    }
+      await sendWhatsAppMessage(p.phone, '🌅 Morning! Take meds & check glucose. Have a healthy day! 😊');
+    } catch (e) { console.error(`Failed: ${p.phone}`); }
   }
 });
 
 cron.schedule('0 20 * * *', async () => {
-  console.log('⏰ Running evening reminders...');
+  console.log('⏰ Evening reminders');
   const patients = await Patient.find({ 'reminderPreferences.glucoseLogging': true });
-  
-  for (const patient of patients) {
-    const todayReadings = await GlucoseReading.find({
-      patientPhone: patient.phone,
+  for (const p of patients) {
+    const today = await GlucoseReading.findOne({
+      patientPhone: p.phone,
       timestamp: { $gte: new Date().setHours(0, 0, 0, 0) }
     });
-
-    if (todayReadings.length === 0) {
+    if (!today) {
       try {
-        await sendWhatsAppMessage(patient.phone, 
-          "🌙 Evening reminder: Don't forget to log your glucose reading today! Just send me your levels. 😊"
-        );
-      } catch (error) {
-        console.error(`❌ Failed to send reminder to ${patient.phone}`);
-      }
+        await sendWhatsAppMessage(p.phone, "🌙 Log your glucose! Send: 'My sugar is [number]' 😊");
+      } catch (e) { console.error(`Failed: ${p.phone}`); }
     }
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`✅ Gemini AI: ${isGeminiAvailable ? 'Enabled' : 'Fallback mode'}`);
-  console.log(`✅ MongoDB: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Connecting...'}`);
+  console.log(`
+╔═══════════════════════════════════╗
+║  GLUCO SAHAYAK v2.2              ║
+╠═══════════════════════════════════╣
+║  Status: ✅ Running               ║
+║  Port: ${PORT}                    ║
+║  Gemini: ${isGeminiAvailable ? `✅ ${currentModel}` : '⚠️  Fallback'}      ║
+║  DB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting'}           ║
+╚═══════════════════════════════════╝
+  `);
 });
