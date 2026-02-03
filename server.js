@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const cron = require('node-cron');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 app.use(express.json());
@@ -13,61 +12,50 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// Initialize Gemini AI - automatically tries latest models first
-let genAI;
-let isGeminiAvailable = false;
-let currentModel = null;
+// DeepSeek Configuration
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
+let isDeepSeekAvailable = false;
 
-// Model priority list - tries newest first, falls back to older
-const MODEL_PRIORITY = [
-  'gemini-2.0-flash-exp',     // Latest experimental (Feb 2025)
-  'gemini-2.0-flash',         // Stable 2.0
-  'gemini-1.5-flash-latest',  // Latest 1.5
-  'gemini-1.5-flash',         // Stable 1.5
-  'gemini-pro'                // Legacy fallback
-];
-
-async function initializeGemini() {
+// Test DeepSeek API on startup
+async function initializeDeepSeek() {
   try {
-    if (!GEMINI_API_KEY || GEMINI_API_KEY === 'your_gemini_api_key_here') {
-      console.warn('⚠️  Gemini API key not configured - using fallback mode');
+    if (!DEEPSEEK_API_KEY || DEEPSEEK_API_KEY === 'your_deepseek_api_key_here') {
+      console.warn('⚠️  DeepSeek API key not configured - using fallback mode');
       return false;
     }
 
-    genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    
-    // Try each model until one works
-    for (const modelName of MODEL_PRIORITY) {
-      try {
-        console.log(`🔄 Testing ${modelName}...`);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const testResult = await model.generateContent("Hi");
-        
-        if (testResult?.response) {
-          currentModel = modelName;
-          isGeminiAvailable = true;
-          console.log(`✅ Connected to ${modelName}`);
-          return true;
+    // Test API connection
+    const response = await axios.post(
+      DEEPSEEK_API_URL,
+      {
+        model: 'deepseek-reasoner',
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 50
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+          'Content-Type': 'application/json'
         }
-      } catch (error) {
-        console.log(`⚠️  ${modelName} unavailable: ${error.message}`);
-        continue;
       }
+    );
+
+    if (response.data?.choices?.[0]?.message) {
+      isDeepSeekAvailable = true;
+      console.log('✅ DeepSeek R1 connected successfully');
+      return true;
     }
-    
-    console.error('❌ All Gemini models failed - using fallback');
-    return false;
-    
   } catch (error) {
-    console.error('❌ Gemini init error:', error.message);
+    console.error('❌ DeepSeek initialization failed:', error.response?.data || error.message);
+    isDeepSeekAvailable = false;
     return false;
   }
 }
 
-initializeGemini();
+initializeDeepSeek();
 
 // MongoDB Schemas
 const patientSchema = new mongoose.Schema({
@@ -157,20 +145,11 @@ async function downloadWhatsAppMedia(mediaId) {
   }
 }
 
+// Note: DeepSeek doesn't support audio transcription natively
+// Would need a separate transcription service like OpenAI Whisper
 async function transcribeAudio(audioBuffer) {
-  if (!isGeminiAvailable) return null;
-  
-  try {
-    const model = genAI.getGenerativeModel({ model: currentModel });
-    const result = await model.generateContent([
-      "Transcribe this audio about diabetes/blood sugar. Return only transcription.",
-      { inlineData: { data: audioBuffer.toString('base64'), mimeType: 'audio/ogg' } }
-    ]);
-    return result.response.text();
-  } catch (error) {
-    console.error('❌ Transcription failed:', error.message);
-    return null;
-  }
+  console.warn('⚠️  Audio transcription not available with DeepSeek');
+  return null;
 }
 
 // Smart Fallback System
@@ -301,46 +280,77 @@ How can I help?
 Just ask! 😊`;
 }
 
-async function analyzeWithGemini(phone, message, history = []) {
-  if (isGeminiAvailable) {
+// DeepSeek AI Integration
+async function analyzeWithDeepSeek(phone, message, history = []) {
+  if (isDeepSeekAvailable) {
     try {
-      const model = genAI.getGenerativeModel({ 
-        model: currentModel,
-        generationConfig: { temperature: 0.7, maxOutputTokens: 400 }
-      });
-
       const patient = await Patient.findOne({ phone });
       const readings = await GlucoseReading.find({ patientPhone: phone })
         .sort({ timestamp: -1 }).limit(5);
 
-      const prompt = `You are Gluco Sahayak, a caring diabetes assistant for Indian patients.
+      const systemPrompt = `You are Gluco Sahayak, a caring diabetes management assistant for patients in India.
 
-Context:
-- Patient: ${patient?.name || 'New'}
-- Recent readings: ${readings.map(r => `${r.reading}mg/dL`).join(', ') || 'None'}
+PATIENT CONTEXT:
+- Name: ${patient?.name || 'New patient'}
+- Recent glucose readings: ${readings.map(r => `${r.reading} mg/dL (${r.readingType})`).join(', ') || 'No previous readings'}
 
-User: "${message}"
+MEDICAL GUIDELINES (CMR 2018, IDF 2021, WHO):
+- Fasting glucose: Normal <100, Prediabetes 100-125, Diabetes ≥126 mg/dL
+- Postprandial (2hr): Normal <140, Prediabetes 140-199, Diabetes ≥200 mg/dL
+- Critical levels: <70 (hypoglycemia - urgent!), >250 (severe hyperglycemia - urgent!)
+- HbA1c target: <7% for most adults
 
-Respond (max 120 words):
-- Warm and supportive
-- If glucose mentioned: acknowledge, advise per guidelines
-- Indian context (roti, dal, walking)
-- Normal fasting <100, critical <70 or >250
-- Encourage healthy habits`;
+YOUR ROLE:
+1. Log and analyze glucose readings when mentioned
+2. Provide evidence-based diet/lifestyle advice for Indian patients
+3. Be warm, supportive, and culturally sensitive
+4. Use Indian context: roti, dal, sabzi, walking, yoga
+5. If critical levels detected, strongly urge immediate medical attention
+6. Always clarify you provide guidance, not replace doctor consultation
 
-      const result = await model.generateContent(prompt);
-      const text = await result.response.text();
+RESPONSE STYLE:
+- Concise (max 150 words)
+- Empathetic and encouraging
+- Practical and actionable
+- Clear warnings for dangerous levels
+
+Current user message: "${message}"
+
+Respond naturally and helpfully:`;
+
+      const response = await axios.post(
+        DEEPSEEK_API_URL,
+        {
+          model: 'deepseek-reasoner',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: message }
+          ],
+          max_tokens: 600,
+          temperature: 0.7
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000 // 10 second timeout
+        }
+      );
+
+      const aiResponse = response.data?.choices?.[0]?.message?.content;
       
-      if (text?.length > 10) {
-        console.log(`✅ Gemini (${currentModel})`);
-        return text;
+      if (aiResponse && aiResponse.length > 10) {
+        console.log('✅ DeepSeek R1 response generated');
+        return aiResponse;
       }
-    } catch (err) {
-      console.error('❌ Gemini error:', err.message);
+    } catch (error) {
+      console.error('❌ DeepSeek error:', error.response?.data || error.message);
+      // Fall through to fallback
     }
   }
   
-  console.log('ℹ️ Using fallback');
+  console.log('ℹ️ Using fallback response');
   return generateSmartResponse(message);
 }
 
@@ -375,16 +385,33 @@ async function checkCriticalLevels(reading, type, phone) {
 
   if (reading < thresh.critical_low) {
     critical = true;
-    alert = `🚨 HYPOGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ URGENT ACTION NEEDED`;
+    alert = `🚨 HYPOGLYCEMIA ALERT
+
+Patient: ${phone}
+Reading: ${reading} mg/dL
+Type: ${type}
+Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+
+⚠️ IMMEDIATE ACTION REQUIRED
+Patient needs urgent attention for dangerously low blood sugar!`;
+    
   } else if (reading > thresh.critical_high) {
     critical = true;
-    alert = `🚨 HYPERGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL\nTime: ${new Date().toLocaleString('en-IN')}\n⚠️ MEDICAL ATTENTION NEEDED`;
+    alert = `🚨 HYPERGLYCEMIA ALERT
+
+Patient: ${phone}
+Reading: ${reading} mg/dL
+Type: ${type}
+Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+
+⚠️ HIGH PRIORITY
+Patient requires immediate medical evaluation for severely elevated glucose!`;
   }
 
   if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
     try {
       await sendWhatsAppMessage(PHYSICIAN_PHONE, alert);
-      console.log('✅ Doctor alerted');
+      console.log('✅ Critical alert sent to physician');
     } catch (err) {
       console.error('❌ Alert failed:', err.message);
     }
@@ -409,10 +436,18 @@ async function analyzeTrends(phone) {
   const low = readings.filter(r => r.reading < 70).length;
 
   if (high > readings.length * 0.5) {
-    return `📊 Week: ${high}/${readings.length} high (>180). Avg: ${avg.toFixed(0)}\n💡 Review diet with doctor`;
+    return `📊 7-Day Trend Alert:
+${high}/${readings.length} readings were high (>180 mg/dL)
+Average: ${avg.toFixed(0)} mg/dL
+
+💡 Recommendation: Review diet and medication with your doctor to improve control.`;
   }
   if (low > 2) {
-    return `📊 Week: ${low} lows (<70). Avg: ${avg.toFixed(0)}\n⚠️ Discuss with doctor`;
+    return `📊 7-Day Trend Alert:
+${low} low glucose episodes (<70 mg/dL)
+Average: ${avg.toFixed(0)} mg/dL
+
+⚠️ Important: Discuss these lows with your doctor to prevent hypoglycemia.`;
   }
   return null;
 }
@@ -441,18 +476,10 @@ app.post('/webhook', async (req, res) => {
     if (type === 'text') {
       userMsg = msg.text.body;
     } else if (type === 'audio') {
-      const audio = await downloadWhatsAppMedia(msg.audio.id);
-      if (audio) {
-        const text = await transcribeAudio(audio);
-        if (text) {
-          userMsg = text;
-          await sendWhatsAppMessage(from, `🎤 "${text}"`);
-        } else {
-          return await sendWhatsAppMessage(from, "Couldn't transcribe. Please text instead 😊");
-        }
-      }
+      // DeepSeek doesn't support audio - ask user to send text
+      return await sendWhatsAppMessage(from, "I can't process voice notes yet. Please send your message as text. 😊");
     } else {
-      return await sendWhatsAppMessage(from, "Send text or voice 😊");
+      return await sendWhatsAppMessage(from, "Please send text messages. 😊");
     }
 
     let conv = await Conversation.findOne({ patientPhone: from });
@@ -461,7 +488,7 @@ app.post('/webhook', async (req, res) => {
     conv.messages.push({ role: 'user', content: userMsg });
     if (conv.messages.length > 10) conv.messages = conv.messages.slice(-10);
 
-    const aiReply = await analyzeWithGemini(from, userMsg, conv.messages);
+    const aiReply = await analyzeWithDeepSeek(from, userMsg, conv.messages);
 
     conv.messages.push({ role: 'assistant', content: aiReply });
     conv.lastActive = new Date();
@@ -480,7 +507,7 @@ app.post('/webhook', async (req, res) => {
       });
 
       await reading.save();
-      console.log(`✅ ${data.reading} mg/dL (${data.readingType})`);
+      console.log(`✅ Saved: ${data.reading} mg/dL (${data.readingType})`);
 
       if (await checkCriticalLevels(data.reading, data.readingType, from)) {
         reading.alertSent = true;
@@ -500,9 +527,10 @@ app.get('/', (req, res) => {
   res.json({
     status: 'running',
     service: 'Gluco Sahayak',
-    version: '2.2',
-    gemini: isGeminiAvailable ? currentModel : 'fallback (fully functional)',
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'connecting'
+    version: '3.0',
+    ai: isDeepSeekAvailable ? 'DeepSeek R1 (active)' : 'Fallback mode (fully functional)',
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'connecting',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -512,7 +540,7 @@ cron.schedule('0 8 * * *', async () => {
   const patients = await Patient.find({ 'reminderPreferences.medication': true });
   for (const p of patients) {
     try {
-      await sendWhatsAppMessage(p.phone, '🌅 Morning! Take meds & check glucose. Have a healthy day! 😊');
+      await sendWhatsAppMessage(p.phone, '🌅 Good morning! Time to take your medication and check your fasting glucose. Have a healthy day! 😊');
     } catch (e) { console.error(`Failed: ${p.phone}`); }
   }
 });
@@ -527,7 +555,7 @@ cron.schedule('0 20 * * *', async () => {
     });
     if (!today) {
       try {
-        await sendWhatsAppMessage(p.phone, "🌙 Log your glucose! Send: 'My sugar is [number]' 😊");
+        await sendWhatsAppMessage(p.phone, "🌙 Evening reminder: Don't forget to log your glucose reading today! Just send: 'My sugar is [number]' 😊");
       } catch (e) { console.error(`Failed: ${p.phone}`); }
     }
   }
@@ -536,11 +564,12 @@ cron.schedule('0 20 * * *', async () => {
 app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════╗
-║  GLUCO SAHAYAK v2.2              ║
+║  GLUCO SAHAYAK v3.0              ║
+║  Powered by DeepSeek R1          ║
 ╠═══════════════════════════════════╣
 ║  Status: ✅ Running               ║
 ║  Port: ${PORT}                    ║
-║  Gemini: ${isGeminiAvailable ? `✅ ${currentModel}` : '⚠️  Fallback'}      ║
+║  AI: ${isDeepSeekAvailable ? '✅ DeepSeek R1' : '⚠️  Fallback'}        ║
 ║  DB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⏳ Connecting'}           ║
 ╚═══════════════════════════════════╝
   `);
