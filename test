@@ -514,12 +514,19 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
   try {
     let state = await OnboardingState.findOne({ phone });
     
+    // ⭐ FIRST TIME USER - SEND WELCOME MESSAGE ⭐
     if (!state) {
       state = await OnboardingState.create({
         phone,
         currentStep: 'language',
         data: new Map()
       });
+      
+      // Send welcome message in English (default)
+      return { 
+        response: MESSAGES.welcome.en, 
+        completed: false 
+      };
     }
 
     const lower = message.toLowerCase();
