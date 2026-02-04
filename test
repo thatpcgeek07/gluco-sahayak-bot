@@ -1,12 +1,48 @@
+const express = require('express');
+const axios = require('axios');
+const mongoose = require('mongoose');
+const cron = require('node-cron');
+const pdfParse = require('pdf-parse');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+app.use(express.json());
+
 // ========================================
-// ONBOARDING SYSTEM - ADD TO YOUR server.js
+// CONFIGURATION
 // ========================================
 
-// Updated Patient Schema with ALL fields
+const PORT = process.env.PORT || 3000;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
+
+// ⭐ YOUR GOOGLE DRIVE MEDICAL TEXTBOOKS
+const MEDICAL_PDF_FILES = [
+  { fileId: '1bG1owFgs9AfJRc3c8XGJDTGzshyVqfYM', filename: 'medical_textbook_1.pdf', source: 'Medical_Reference_1' },
+  { fileId: '1H3SmbA4ZMQ3hKcuoG-AoRkdU8Kyh9t1j', filename: 'medical_textbook_2.pdf', source: 'Medical_Reference_2' },
+  { fileId: '1vYC0ncfuz1nsVldijZG3uG_ZzWc_MH9N', filename: 'medical_textbook_3.pdf', source: 'Medical_Reference_3' },
+  { fileId: '127OJ05vyE3b7KcFvjTJZWmekHmCAwukA', filename: 'medical_textbook_4.pdf', source: 'Medical_Reference_4' }
+];
+
+const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+let isClaudeAvailable = false;
+let ragSystemInitialized = false;
+
+// ========================================
+// MONGODB SCHEMAS
+// ========================================
+
+// Patient Schema - ALL 15 FIELDS + MORE
 const patientSchema = new mongoose.Schema({
   // Phase 1: User Identity
   phone: { type: String, required: true, unique: true },
-  language_pref: { type: String, enum: ['en', 'hi', 'kn'], default: 'en' }, // English, Hindi, Kannada
+  language_pref: { type: String, enum: ['en', 'hi', 'kn'], default: 'en' },
   full_name: String,
   age: Number,
   gender: { type: String, enum: ['Male', 'Female', 'Other'] },
@@ -16,29 +52,37 @@ const patientSchema = new mongoose.Schema({
   
   // Phase 2: Medical Profile
   diabetes_type: { type: String, enum: ['Type 1', 'Type 2', 'Gestational'] },
-  duration_years: Number, // Years since diagnosis
+  duration_years: Number,
   medication_type: { type: String, enum: ['Insulin', 'Tablets', 'Both', 'None'] },
-  current_meds: [String], // List of medications
-  comorbidities: [String], // BP, cholesterol, etc.
+  current_meds: [String],
+  comorbidities: [String],
   last_hba1c: Number,
   diet_preference: { type: String, enum: ['Veg', 'Non-Veg', 'Eggetarian'] },
   
   // Onboarding Status
   onboarding_completed: { type: Boolean, default: false },
-  onboarding_step: { type: String, default: 'welcome' },
+  onboarding_step: { type: String, default: 'language' },
   
-  // Old fields (keep for compatibility)
+  // Activity Tracking
   registeredAt: { type: Date, default: Date.now },
+  lastActive: { type: Date, default: Date.now },
+  totalConversations: { type: Number, default: 0 },
+  
+  // Medication Schedule
   medicationSchedule: [{
     medicationName: String,
     time: String,
     frequency: String
   }],
+  
+  // Reminder Preferences
   reminderPreferences: {
     glucoseLogging: { type: Boolean, default: true },
     medication: { type: Boolean, default: true }
   }
 });
+
+const Patient = mongoose.model('Patient', patientSchema);
 
 // Onboarding State Schema
 const onboardingStateSchema = new mongoose.Schema({
@@ -50,8 +94,93 @@ const onboardingStateSchema = new mongoose.Schema({
 
 const OnboardingState = mongoose.model('OnboardingState', onboardingStateSchema);
 
+// Medical Knowledge Schema (RAG)
+const medicalKnowledgeSchema = new mongoose.Schema({
+  source: { type: String, required: true },
+  content: { type: String, required: true },
+  keywords: [String],
+  pageNumber: Number,
+  chunkIndex: Number,
+  lastUpdated: { type: Date, default: Date.now }
+});
+
+medicalKnowledgeSchema.index({ content: 'text', keywords: 'text' });
+medicalKnowledgeSchema.index({ source: 1, keywords: 1 });
+
+const MedicalKnowledge = mongoose.model('MedicalKnowledge', medicalKnowledgeSchema);
+
+// Triage Schema
+const triageSchema = new mongoose.Schema({
+  patientPhone: String,
+  timestamp: { type: Date, default: Date.now },
+  urgencyLevel: { 
+    type: String, 
+    enum: ['EMERGENCY', 'URGENT', 'ROUTINE', 'MONITORING'],
+    required: true 
+  },
+  symptoms: [String],
+  glucoseReading: Number,
+  aiAssessment: String,
+  medicalReferences: [{ source: String, content: String }],
+  physicianAlerted: Boolean
+});
+
+const Triage = mongoose.model('Triage', triageSchema);
+
+// Glucose Readings Schema
+const glucoseReadingSchema = new mongoose.Schema({
+  patientPhone: String,
+  reading: Number,
+  readingType: { type: String, enum: ['fasting', 'postprandial', 'random'] },
+  timestamp: { type: Date, default: Date.now },
+  symptoms: [String],
+  notes: String,
+  alertSent: Boolean,
+  triageId: mongoose.Schema.Types.ObjectId
+});
+
+const GlucoseReading = mongoose.model('GlucoseReading', glucoseReadingSchema);
+
+// Conversation History Schema
+const conversationSchema = new mongoose.Schema({
+  patientPhone: String,
+  messages: [{ role: String, content: String, timestamp: Date }],
+  lastActive: Date
+});
+
+const Conversation = mongoose.model('Conversation', conversationSchema);
+
 // ========================================
-// MULTI-LANGUAGE RESPONSES
+// DATABASE CONNECTION
+// ========================================
+
+mongoose.connect(MONGODB_URI).then(async () => {
+  console.log('✅ MongoDB connected');
+  await initializeRAGSystem();
+}).catch(err => console.error('❌ MongoDB:', err.message));
+
+async function initializeRAGSystem() {
+  try {
+    const existingCount = await MedicalKnowledge.countDocuments();
+    
+    if (existingCount > 50) {
+      console.log(`✅ RAG System ready (${existingCount} chunks)`);
+      ragSystemInitialized = true;
+      return;
+    }
+
+    console.log('📚 RAG not initialized');
+    console.log('📝 Call: POST /admin/process-pdfs');
+    console.log(`📂 ${MEDICAL_PDF_FILES.length} textbooks configured`);
+    
+    ragSystemInitialized = false;
+  } catch (error) {
+    console.error('❌ RAG init error:', error.message);
+  }
+}
+
+// ========================================
+// MULTI-LANGUAGE MESSAGES
 // ========================================
 
 const MESSAGES = {
@@ -95,24 +224,21 @@ To start, please tell me:
 • Your Name
 • Your Age
 
-Example: "My name is Ramesh Kumar, age 55"
-(You can type or send a Voice Note 🎙️)`,
+Example: "My name is Ramesh Kumar, age 55"`,
     hi: `बढ़िया! मैं English/Hindi mix में बात करूंगा ताकि आसान हो। 😊
 
 बताइए:
 • आपका नाम (Name)
 • उम्र (Age)
 
-Example: "Mera naam Ramesh Kumar hai, umar 55 saal"
-(Type करें या Voice Note भेजें 🎙️)`,
+Example: "Mera naam Ramesh Kumar hai, umar 55 saal"`,
     kn: `ಚೆನ್ನಾಗಿದೆ! ನಾನು English/Kannada mix ನಲ್ಲಿ ಮಾತನಾಡುತ್ತೇನೆ. 😊
 
 ದಯವಿಟ್ಟು ಹೇಳಿ:
 • ನಿಮ್ಮ ಹೆಸರು (Name)
 • ವಯಸ್ಸು (Age)
 
-Example: "My name is Ramesh, age 55"
-(Type ಮಾಡಿ ಅಥವಾ Voice Note ಕಳುಹಿಸಿ 🎙️)`
+Example: "My name is Ramesh, age 55"`
   },
   
   ask_gender_emergency: {
@@ -198,7 +324,7 @@ Number ಟೈಪ್ ಮಾಡಿ.`
 
 How many years have you had diabetes?
 
-Example: "10 years" or "Abhi naya hai" (Just diagnosed)`,
+Example: "10 years" or "Just diagnosed"`,
     hi: `समझ गया। 📝
 
 कितने साल से diabetes है?
@@ -215,7 +341,7 @@ Example: "10 years" ಅಥವಾ "ಈಗ ತಾನೆ"`
     en: `Important! 💊
 
 What medicine are you taking for diabetes?
-1️⃣ Only Tablets (गोली)
+1️⃣ Only Tablets
 2️⃣ Only Insulin Injection
 3️⃣ Both Tablets + Insulin
 4️⃣ No medicine yet
@@ -224,7 +350,7 @@ Type the number.`,
     hi: `बहुत important! 💊
 
 Diabetes के लिए कौन सी दवाई लेते हैं?
-1️⃣ सिर्फ Tablets (गोली)
+1️⃣ सिर्फ Tablets
 2️⃣ सिर्फ Insulin Injection
 3️⃣ दोनों (Tablets + Insulin)
 4️⃣ अभी कोई दवाई नहीं
@@ -381,12 +507,11 @@ Let's start! What is your current sugar reading?
 };
 
 // ========================================
-// ONBOARDING LOGIC
+// ONBOARDING SYSTEM
 // ========================================
 
 async function handleOnboarding(phone, message, messageType = 'text', mediaData = null) {
   try {
-    // Get or create onboarding state
     let state = await OnboardingState.findOne({ phone });
     
     if (!state) {
@@ -402,10 +527,8 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
     let nextStep = state.currentStep;
     let lang = state.data.get('language_pref') || 'en';
 
-    // Step-by-step onboarding flow
     switch (state.currentStep) {
       case 'language':
-        // User selects language
         if (lower.includes('1') || lower.includes('english')) {
           lang = 'en';
         } else if (lower.includes('2') || lower.includes('hindi') || lower.includes('हिंदी')) {
@@ -420,7 +543,6 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'name_age':
-        // Extract name and age
         const nameAgeMatch = message.match(/(?:name|naam|ನಾನು|ಹೆಸರು)[\s:]*([a-zA-Z\s]+)[\s,]+(?:age|umar|ವಯಸ್ಸು|years?)[\s:]*(\d+)/i);
         
         if (nameAgeMatch) {
@@ -428,7 +550,7 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
           state.data.set('age', parseInt(nameAgeMatch[2]));
           
           nextStep = 'gender_emergency';
-          const name = nameAgeMatch[1].trim().split(' ')[0]; // First name
+          const name = nameAgeMatch[1].trim().split(' ')[0];
           response = MESSAGES.ask_gender_emergency[lang].replace('{name}', name);
         } else {
           response = "I didn't quite get that. Please tell me: Name and Age\nExample: 'My name is Ramesh, age 55'";
@@ -436,7 +558,6 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'gender_emergency':
-        // Extract gender and emergency contact
         let gender = null;
         if (lower.includes('male') || lower.includes('पुरुष')) gender = 'Male';
         if (lower.includes('female') || lower.includes('महिला')) gender = 'Female';
@@ -455,7 +576,6 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'pincode_consent':
-        // Extract pincode and consent
         const pincodeMatch = message.match(/(\d{6})/);
         const hasConsent = lower.includes('yes') || lower.includes('हां') || lower.includes('ha') || 
                           lower.includes('consent') || lower.includes('ಹೌದು');
@@ -472,7 +592,7 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'diabetes_type':
-        let diabetesType = 'Type 2'; // Default
+        let diabetesType = 'Type 2';
         
         if (lower.includes('1') || lower.includes('type 1')) {
           diabetesType = 'Type 1';
@@ -488,7 +608,6 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'duration':
-        // Extract duration in years
         const yearMatch = message.match(/(\d+)/);
         const duration = yearMatch ? parseInt(yearMatch[1]) : 0;
         
@@ -516,15 +635,11 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         break;
 
       case 'medicine_names':
-        // Handle photo or text
         if (messageType === 'image' && mediaData) {
-          // TODO: OCR processing for medicine strip
           response = "📸 Got your medicine photo! Processing...\n\nFor now, please also TYPE the medicine names if you know them.";
           state.data.set('medicine_photo_received', true);
-          // Stay on same step for text input
         } else {
-          // Extract medicine names
-          const commonMeds = ['metformin', 'glimepiride', 'glyburide', 'insulin', 'glargine', 'lispro'];
+          const commonMeds = ['metformin', 'glimepiride', 'glyburide', 'insulin', 'glargine', 'lispro', 'sitagliptin', 'dapagliflozin'];
           const foundMeds = [];
           
           commonMeds.forEach(med => {
@@ -590,14 +705,12 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
         
         state.data.set('diet_preference', diet);
         
-        // ONBOARDING COMPLETE!
         await savePatientData(phone, state.data);
         nextStep = 'completed';
         response = MESSAGES.onboarding_complete[lang];
         break;
     }
 
-    // Update state
     state.currentStep = nextStep;
     state.lastUpdated = new Date();
     await state.save();
@@ -613,7 +726,6 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
   }
 }
 
-// Save completed onboarding data to Patient
 async function savePatientData(phone, dataMap) {
   try {
     const patientData = {
@@ -648,7 +760,6 @@ async function savePatientData(phone, dataMap) {
   }
 }
 
-// Check if user needs onboarding
 async function checkOnboardingStatus(phone) {
   const patient = await Patient.findOne({ phone });
   
@@ -656,15 +767,584 @@ async function checkOnboardingStatus(phone) {
     return { needsOnboarding: true, step: patient?.onboarding_step || 'language' };
   }
   
-  return { needsOnboarding: false };
+  return { needsOnboarding: false, patient };
 }
 
 // ========================================
-// EXPORT THESE FUNCTIONS
+// PDF PROCESSING (RAG SYSTEM)
 // ========================================
 
-module.exports = {
-  handleOnboarding,
-  checkOnboardingStatus,
-  MESSAGES
+function extractKeywords(text) {
+  const keywords = [];
+  const terms = [
+    'diabetes', 'glucose', 'insulin', 'hyperglycemia', 'hypoglycemia',
+    'HbA1c', 'blood sugar', 'pancreas', 'type 1', 'type 2',
+    'metformin', 'glycemic', 'fasting', 'postprandial', 'complications',
+    'retinopathy', 'neuropathy', 'nephropathy', 'cardiovascular',
+    'diet', 'exercise', 'medication', 'management', 'monitoring'
+  ];
+
+  const lower = text.toLowerCase();
+  terms.forEach(term => {
+    if (lower.includes(term)) keywords.push(term);
+  });
+
+  return [...new Set(keywords)];
+}
+
+async function downloadFromGoogleDrive(fileId, filename) {
+  try {
+    console.log(`📥 Downloading ${filename}...`);
+    
+    const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'arraybuffer',
+      timeout: 120000
+    });
+
+    const filePath = path.join('/tmp', filename);
+    fs.writeFileSync(filePath, response.data);
+    
+    console.log(`✅ Downloaded: ${filename}`);
+    return filePath;
+  } catch (error) {
+    console.error(`❌ Download failed: ${error.message}`);
+    
+    try {
+      const altUrl = `https://drive.google.com/u/0/uc?id=${fileId}&export=download&confirm=t`;
+      const response = await axios({
+        method: 'GET',
+        url: altUrl,
+        responseType: 'arraybuffer',
+        timeout: 120000
+      });
+      
+      const filePath = path.join('/tmp', filename);
+      fs.writeFileSync(filePath, response.data);
+      console.log(`✅ Downloaded (alt method)`);
+      return filePath;
+    } catch (altError) {
+      console.error(`❌ Alt download failed: ${altError.message}`);
+      return null;
+    }
+  }
+}
+
+async function processPDFFile(filePath, source) {
+  try {
+    console.log(`📖 Processing ${source}...`);
+    
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+    
+    console.log(`📄 Pages: ${data.numpages}`);
+
+    const paragraphs = data.text
+      .split(/\n\s*\n/)
+      .map(p => p.trim())
+      .filter(p => p.length > 200 && p.length < 2000);
+
+    console.log(`📦 ${paragraphs.length} chunks`);
+
+    let saved = 0;
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const chunk = paragraphs[i];
+      const keywords = extractKeywords(chunk);
+      
+      if (keywords.length > 0) {
+        await MedicalKnowledge.create({
+          source,
+          content: chunk,
+          keywords,
+          pageNumber: Math.floor((i / paragraphs.length) * data.numpages),
+          chunkIndex: i
+        });
+        saved++;
+      }
+
+      if ((i + 1) % 50 === 0) {
+        console.log(`   ${i + 1}/${paragraphs.length}`);
+      }
+    }
+
+    console.log(`✅ ${source}: ${saved} chunks saved`);
+    
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
+    
+    return saved;
+  } catch (error) {
+    console.error(`❌ Processing error: ${error.message}`);
+    return 0;
+  }
+}
+
+app.post('/admin/process-pdfs', async (req, res) => {
+  res.json({ 
+    status: 'started',
+    message: 'Processing medical textbooks in background',
+    files: MEDICAL_PDF_FILES.length
+  });
+
+  processAllPDFs();
+});
+
+async function processAllPDFs() {
+  console.log('\n🏥 PROCESSING MEDICAL PDFs\n');
+
+  let totalChunks = 0;
+
+  for (let i = 0; i < MEDICAL_PDF_FILES.length; i++) {
+    const file = MEDICAL_PDF_FILES[i];
+    
+    console.log(`\n[${i + 1}/${MEDICAL_PDF_FILES.length}] ${file.source}`);
+
+    const filePath = await downloadFromGoogleDrive(file.fileId, file.filename);
+    
+    if (filePath) {
+      const chunks = await processPDFFile(filePath, file.source);
+      totalChunks += chunks;
+    }
+  }
+
+  ragSystemInitialized = totalChunks > 0;
+
+  console.log(`\n✅ DONE! ${totalChunks} total chunks\n`);
+}
+
+app.get('/admin/rag-status', async (req, res) => {
+  const totalChunks = await MedicalKnowledge.countDocuments();
+  const bySource = await MedicalKnowledge.aggregate([
+    { $group: { _id: '$source', count: { $sum: 1 } } }
+  ]);
+
+  res.json({
+    initialized: ragSystemInitialized,
+    totalChunks,
+    bySource,
+    ready: totalChunks > 50,
+    files: MEDICAL_PDF_FILES.map(f => f.source)
+  });
+});
+
+async function retrieveMedicalKnowledge(query, topK = 5) {
+  try {
+    const results = await MedicalKnowledge
+      .find(
+        { $text: { $search: query } },
+        { score: { $meta: 'textScore' } }
+      )
+      .sort({ score: { $meta: 'textScore' } })
+      .limit(topK);
+
+    if (results.length === 0) {
+      const keywords = extractKeywords(query);
+      if (keywords.length > 0) {
+        return await MedicalKnowledge.find({ keywords: { $in: keywords } }).limit(topK);
+      }
+    }
+
+    return results;
+  } catch (error) {
+    return [];
+  }
+}
+
+// ========================================
+// TRIAGE SYSTEM
+// ========================================
+
+function assessUrgency(glucose, symptoms = []) {
+  if (glucose < 54 || glucose > 400) return 'EMERGENCY';
+  if (symptoms.some(s => ['unconscious', 'confusion', 'seizure'].includes(s.toLowerCase()))) {
+    return 'EMERGENCY';
+  }
+  if (glucose < 70 || glucose > 250) return 'URGENT';
+  if (glucose > 180 || glucose < 80) return 'ROUTINE';
+  return 'MONITORING';
+}
+
+async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medicalRefs) {
+  const urgency = assessUrgency(glucose, symptoms);
+  
+  await Triage.create({
+    patientPhone: phone,
+    urgencyLevel: urgency,
+    symptoms,
+    glucoseReading: glucose,
+    aiAssessment,
+    medicalReferences: medicalRefs,
+    physicianAlerted: urgency === 'EMERGENCY' || urgency === 'URGENT'
+  });
+
+  console.log(`🏥 Triage: ${urgency}`);
+  return urgency;
+}
+
+// ========================================
+// CLAUDE AI WITH PATIENT CONTEXT
+// ========================================
+
+async function initializeClaude() {
+  if (!ANTHROPIC_API_KEY) return false;
+
+  try {
+    const response = await axios.post(CLAUDE_API_URL, {
+      model: CLAUDE_MODEL,
+      max_tokens: 50,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      }
+    });
+
+    if (response.data?.content?.[0]?.text) {
+      isClaudeAvailable = true;
+      console.log('✅ Claude ready');
+      return true;
+    }
+  } catch (error) {
+    console.error('❌ Claude failed');
+  }
+  return false;
+}
+
+initializeClaude();
+
+const THRESHOLDS = {
+  fasting: { critical_low: 70, critical_high: 250 },
+  postprandial: { critical_low: 70, critical_high: 300 },
+  random: { critical_low: 70, critical_high: 250 }
 };
+
+async function sendWhatsAppMessage(to, message) {
+  try {
+    await axios.post(`https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: message }
+    }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` } });
+    console.log(`✅ Sent`);
+  } catch (e) {
+    console.error('❌ Send failed');
+  }
+}
+
+function fallbackResponse(msg) {
+  const lower = msg.toLowerCase();
+  const num = msg.match(/(\d{2,3})/);
+  const glucose = num ? parseInt(num[1]) : null;
+  
+  if (lower.match(/^(hi|hello|namaste)/)) {
+    return `Hello! 🙏 Gluco Sahayak - Your diabetes assistant.\n\n📚 Medical guidance\n📊 Glucose tracking\n🏥 Emergency alerts\n\nSend: "My sugar is 120" 😊`;
+  }
+  
+  if (glucose && glucose >= 40 && glucose <= 500) {
+    let r = `✅ Logged: ${glucose} mg/dL\n\n`;
+    
+    if (glucose < 54) r += `🚨🚨 EMERGENCY! Eat 15g carbs NOW! Call doctor!`;
+    else if (glucose < 70) r += `🚨 LOW! Eat 15g fast carbs. Recheck in 15min.`;
+    else if (glucose <= 100) r += `✅ EXCELLENT! Normal range 👏`;
+    else if (glucose <= 125) r += `⚠️ PREDIABETES. Diet + exercise.`;
+    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet & meds.`;
+    else if (glucose <= 250) r += `🚨 HIGH! Water, walk, recheck 2hr.`;
+    else if (glucose <= 400) r += `🚨🚨 SEVERE! Contact doctor NOW!`;
+    else r += `🚨🚨🚨 CRITICAL! Go to ER!`;
+    
+    return r;
+  }
+  
+  return `How can I help?\n📊 "My sugar is 120"\n🍽️ "Diet advice"\n🚶 "Exercise tips"`;
+}
+
+// ⭐⭐⭐ CLAUDE WITH FULL PATIENT CONTEXT ⭐⭐⭐
+async function analyzeWithClaudeRAG(phone, msg, patient) {
+  if (!isClaudeAvailable) return fallbackResponse(msg);
+
+  try {
+    // Retrieve medical knowledge
+    const medicalContext = ragSystemInitialized 
+      ? await retrieveMedicalKnowledge(msg, 5)
+      : [];
+    
+    // Get patient's recent glucose readings
+    const readings = await GlucoseReading.find({ patientPhone: phone })
+      .sort({ timestamp: -1 }).limit(10);
+
+    // Build medical references
+    const references = medicalContext.length > 0
+      ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 500)}...`).join('\n\n')
+      : 'Standard medical protocols.';
+
+    // ⭐ BUILD COMPLETE PATIENT PROFILE FOR CLAUDE ⭐
+    const patientProfile = `
+PATIENT PROFILE:
+- Name: ${patient.full_name} (${patient.age} years, ${patient.gender})
+- Diabetes Type: ${patient.diabetes_type}
+- Duration: ${patient.duration_years} years
+- Medications: ${patient.medication_type} - ${patient.current_meds?.join(', ') || 'None'}
+- Comorbidities: ${patient.comorbidities?.join(', ') || 'None'}
+- Last HbA1c: ${patient.last_hba1c || 'Unknown'}
+- Diet: ${patient.diet_preference}
+- Language: ${patient.language_pref}
+- Recent Readings: ${readings.slice(0, 5).map(r => `${r.reading}mg/dL (${r.readingType})`).join(', ') || 'No recent data'}
+`;
+
+    const system = `You are Gluco Sahayak, medical-grade diabetes assistant for Indian patients.
+
+🏥 CRITICAL RULES:
+1. Use ONLY information from medical textbook excerpts below
+2. ALWAYS cite source: [Source Name]
+3. If no excerpt, say "Based on standard protocols"
+4. Consider patient's COMPLETE profile in all advice
+5. Adjust advice based on medication type (hypoglycemia risk varies)
+6. Consider comorbidities (BP = low salt, Heart = stress management)
+7. Diet advice based on preference (Veg/Non-Veg/Egg)
+
+📚 MEDICAL TEXTBOOK EXCERPTS:
+${references}
+
+${patientProfile}
+
+PROTOCOL:
+1. Address patient by name
+2. Assess urgency if glucose mentioned
+3. Cite specific textbook source
+4. Personalized advice based on their:
+   - Age & duration (elderly = gentler targets)
+   - Medications (insulin = hypoglycemia risk)
+   - Comorbidities (BP + diabetes = sodium caution)
+   - Diet preference (suggest appropriate foods)
+5. Indian context (roti, dal, rice, yoga, walking)
+6. Max 150 words, warm but precise
+7. If critical glucose, emphasize urgency
+
+User Message: "${msg}"
+
+Respond with medical citations and personalized advice:`;
+
+    const response = await axios.post(CLAUDE_API_URL, {
+      model: CLAUDE_MODEL,
+      max_tokens: 600,
+      system,
+      messages: [{ role: 'user', content: msg }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      timeout: 15000
+    });
+
+    const text = response.data?.content?.[0]?.text;
+    if (text) {
+      console.log(`✅ Claude RAG (${medicalContext.length} refs) + Patient Context`);
+      
+      // Update patient activity
+      await Patient.findOneAndUpdate(
+        { phone },
+        { 
+          lastActive: new Date(),
+          $inc: { totalConversations: 1 }
+        }
+      );
+      
+      return text;
+    }
+  } catch (e) {
+    console.error('❌ Claude error');
+  }
+  
+  return fallbackResponse(msg);
+}
+
+function extractGlucose(msg) {
+  const match = msg.match(/(\d{2,3})/);
+  const reading = match ? parseInt(match[1]) : null;
+  if (!reading || reading < 40 || reading > 500) return { hasReading: false };
+
+  const lower = msg.toLowerCase();
+  const type = lower.match(/fasting|empty|morning/) ? 'fasting' :
+               lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
+
+  const symptoms = [];
+  ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
+    if (lower.includes(s)) symptoms.push(s);
+  });
+
+  return { hasReading: true, reading, readingType: type, symptoms, notes: msg.substring(0, 200) };
+}
+
+async function checkCritical(reading, type, phone) {
+  const t = THRESHOLDS[type] || THRESHOLDS.random;
+  let critical = false;
+  let urgency = 'MONITORING';
+
+  if (reading < 54 || reading > 400) {
+    critical = true;
+    urgency = 'EMERGENCY';
+  } else if (reading < t.critical_low || reading > t.critical_high) {
+    critical = true;
+    urgency = 'URGENT';
+  }
+
+  if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
+    await sendWhatsAppMessage(PHYSICIAN_PHONE, 
+      `🚨 ${urgency}\nPatient: ${phone}\nGlucose: ${reading} mg/dL`);
+  }
+
+  return { critical, urgency };
+}
+
+// ========================================
+// WEBHOOKS
+// ========================================
+
+app.get('/webhook', (req, res) => {
+  if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+    return res.status(200).send(req.query['hub.challenge']);
+  }
+  res.sendStatus(403);
+});
+
+app.post('/webhook', async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return;
+
+    const from = msg.from;
+    const messageType = msg.type;
+    let text = '';
+    let mediaData = null;
+
+    if (messageType === 'text') {
+      text = msg.text.body;
+    } else if (messageType === 'image') {
+      text = msg.image.caption || '';
+      mediaData = { id: msg.image.id, mime_type: msg.image.mime_type };
+    } else if (messageType === 'audio') {
+      await sendWhatsAppMessage(from, "🎙️ Voice note received! For now, please send text. Voice support coming soon! 😊");
+      return;
+    } else {
+      return;
+    }
+
+    // ⭐ CHECK ONBOARDING STATUS ⭐
+    const onboardingStatus = await checkOnboardingStatus(from);
+
+    if (onboardingStatus.needsOnboarding) {
+      // New user or incomplete onboarding
+      const { response, completed } = await handleOnboarding(from, text, messageType, mediaData);
+      await sendWhatsAppMessage(from, response);
+      
+      if (completed) {
+        console.log(`✅ ${from} completed onboarding`);
+      }
+      return;
+    }
+
+    // ⭐ EXISTING USER - USE FULL PATIENT CONTEXT ⭐
+    const patient = onboardingStatus.patient;
+    
+    const reply = await analyzeWithClaudeRAG(from, text, patient);
+    await sendWhatsAppMessage(from, reply);
+
+    // Process glucose reading if present
+    const data = extractGlucose(text);
+    if (data.hasReading) {
+      const { critical, urgency } = await checkCritical(data.reading, data.readingType, from);
+      
+      await createTriageRecord(from, data.reading, data.symptoms, reply, []);
+
+      await GlucoseReading.create({
+        patientPhone: from,
+        reading: data.reading,
+        readingType: data.readingType,
+        symptoms: data.symptoms,
+        notes: data.notes,
+        alertSent: critical
+      });
+      
+      console.log(`✅ ${patient.full_name}: ${data.reading} (${urgency})`);
+    }
+  } catch (e) {
+    console.error('❌ Webhook:', e.message);
+  }
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    status: 'running',
+    ai: isClaudeAvailable ? 'Claude Sonnet 4' : 'fallback',
+    rag: ragSystemInitialized ? 'ready' : 'call POST /admin/process-pdfs',
+    files: MEDICAL_PDF_FILES.length,
+    features: ['Onboarding', 'RAG', 'Multi-language', 'Patient Context', 'Triage']
+  });
+});
+
+// ========================================
+// REMINDERS
+// ========================================
+
+cron.schedule('0 8 * * *', async () => {
+  const patients = await Patient.find({ 
+    'reminderPreferences.medication': true,
+    onboarding_completed: true 
+  });
+  
+  for (const p of patients) {
+    const greeting = p.language_pref === 'hi' ? '🌅 Namaste' : 
+                     p.language_pref === 'kn' ? '🌅 Namaskara' : '🌅 Good morning';
+    await sendWhatsAppMessage(p.phone, `${greeting} ${p.full_name}! Meds & glucose check 😊`);
+  }
+});
+
+cron.schedule('0 20 * * *', async () => {
+  const patients = await Patient.find({ 
+    'reminderPreferences.glucoseLogging': true,
+    onboarding_completed: true 
+  });
+  
+  for (const p of patients) {
+    const today = await GlucoseReading.findOne({
+      patientPhone: p.phone,
+      timestamp: { $gte: new Date().setHours(0,0,0,0) }
+    });
+    
+    if (!today) {
+      const reminder = p.language_pref === 'hi' ? '🌙 Aaj glucose log karna mat bhoolna!' :
+                       p.language_pref === 'kn' ? '🌙 Glucose log maadodhu!' : '🌙 Log glucose!';
+      await sendWhatsAppMessage(p.phone, reminder);
+    }
+  }
+});
+
+app.listen(PORT, () => console.log(`
+╔════════════════════════════════════════╗
+║  GLUCO SAHAYAK v4.0 - COMPLETE        ║
+╠════════════════════════════════════════╣
+║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}                          ║
+║  RAG: ${ragSystemInitialized ? '✅' : '⚠️ '}                             ║
+║  PDFs: ${MEDICAL_PDF_FILES.length}                            ║
+║  Features:                            ║
+║    ✅ Onboarding (15 fields)          ║
+║    ✅ Patient Context                 ║
+║    ✅ Multi-language (En/Hi/Kn)       ║
+║    ✅ Medical Textbook RAG            ║
+║    ✅ Triage System                   ║
+║    ✅ Emergency Alerts                ║
+╚════════════════════════════════════════╝
+To process PDFs: POST /admin/process-pdfs
+`));
