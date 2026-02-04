@@ -5,9 +5,6 @@ const cron = require('node-cron');
 const pdfParse = require('pdf-parse');
 const fs = require('fs');
 const path = require('path');
-const { promisify } = require('util');
-const stream = require('stream');
-const pipeline = promisify(stream.pipeline);
 
 const app = express();
 app.use(express.json());
@@ -21,17 +18,29 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
 
-// Google Drive Configuration
-const GOOGLE_DRIVE_FOLDER_ID = '1Z2WciU7hJLGua1kQ61Q3ZnnPr2iMyy0Q';
-
-// Medical textbooks mapping
-const MEDICAL_TEXTBOOKS = {
-  'icmr': { source: 'ICMR_Guidelines', keywords: ['icmr', 'guidelines', 'india'] },
-  'park': { source: 'Parks_PSM', keywords: ['park', 'psm', 'preventive'] },
-  'usmle': { source: 'USMLE_FirstAid', keywords: ['usmle', 'first aid', 'step'] },
-  'williams': { source: 'Williams_Endocrinology', keywords: ['williams', 'endocrinology'] },
-  'harrison': { source: 'Harrison_Internal_Medicine', keywords: ['harrison', 'internal medicine'] }
-};
+// ⭐ YOUR GOOGLE DRIVE FILES - CONFIGURED! ⭐
+const MEDICAL_PDF_FILES = [
+  { 
+    fileId: '1bG1owFgs9AfJRc3c8XGJDTGzshyVqfYM', 
+    filename: 'medical_textbook_1.pdf', 
+    source: 'Medical_Reference_1' 
+  },
+  { 
+    fileId: '1H3SmbA4ZMQ3hKcuoG-AoRkdU8Kyh9t1j', 
+    filename: 'medical_textbook_2.pdf', 
+    source: 'Medical_Reference_2' 
+  },
+  { 
+    fileId: '1vYC0ncfuz1nsVldijZG3uG_ZzWc_MH9N', 
+    filename: 'medical_textbook_3.pdf', 
+    source: 'Medical_Reference_3' 
+  },
+  { 
+    fileId: '127OJ05vyE3b7KcFvjTJZWmekHmCAwukA', 
+    filename: 'medical_textbook_4.pdf', 
+    source: 'Medical_Reference_4' 
+  }
+];
 
 // Claude Sonnet 4
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -41,14 +50,7 @@ let ragSystemInitialized = false;
 
 // Medical Knowledge Base Schema
 const medicalKnowledgeSchema = new mongoose.Schema({
-  source: { 
-    type: String, 
-    enum: ['ICMR_Guidelines', 'Parks_PSM', 'USMLE_FirstAid', 'Williams_Endocrinology', 'Harrison_Internal_Medicine'],
-    required: true 
-  },
-  chapter: String,
-  section: String,
-  topic: String,
+  source: { type: String, required: true },
   content: { type: String, required: true },
   keywords: [String],
   pageNumber: Number,
@@ -56,7 +58,7 @@ const medicalKnowledgeSchema = new mongoose.Schema({
   lastUpdated: { type: Date, default: Date.now }
 });
 
-medicalKnowledgeSchema.index({ content: 'text', keywords: 'text', topic: 'text' });
+medicalKnowledgeSchema.index({ content: 'text', keywords: 'text' });
 medicalKnowledgeSchema.index({ source: 1, keywords: 1 });
 
 const MedicalKnowledge = mongoose.model('MedicalKnowledge', medicalKnowledgeSchema);
@@ -74,13 +76,12 @@ const triageSchema = new mongoose.Schema({
   glucoseReading: Number,
   aiAssessment: String,
   medicalReferences: [{ source: String, content: String }],
-  physicianAlerted: Boolean,
-  resolution: String
+  physicianAlerted: Boolean
 });
 
 const Triage = mongoose.model('Triage', triageSchema);
 
-// Existing schemas
+// Patient schemas
 const patientSchema = new mongoose.Schema({
   phone: String,
   name: String,
@@ -88,12 +89,7 @@ const patientSchema = new mongoose.Schema({
   diabetesType: String,
   registeredAt: { type: Date, default: Date.now },
   medicationSchedule: [{ medicationName: String, time: String }],
-  reminderPreferences: { glucoseLogging: Boolean, medication: Boolean },
-  riskProfile: {
-    hasComplications: Boolean,
-    comorbidities: [String],
-    lastEmergency: Date
-  }
+  reminderPreferences: { glucoseLogging: Boolean, medication: Boolean }
 });
 
 const glucoseReadingSchema = new mongoose.Schema({
@@ -110,8 +106,7 @@ const glucoseReadingSchema = new mongoose.Schema({
 const conversationSchema = new mongoose.Schema({
   patientPhone: String,
   messages: [{ role: String, content: String, timestamp: Date }],
-  lastActive: Date,
-  medicalReferencesUsed: [String]
+  lastActive: Date
 });
 
 const Patient = mongoose.model('Patient', patientSchema);
@@ -120,30 +115,66 @@ const Conversation = mongoose.model('Conversation', conversationSchema);
 
 mongoose.connect(MONGODB_URI).then(async () => {
   console.log('✅ MongoDB connected');
-  // Initialize RAG system on startup
   await initializeRAGSystem();
 }).catch(err => console.error('❌ MongoDB:', err.message));
 
 // ========================================
-// GOOGLE DRIVE PDF DOWNLOADER
+// RAG SYSTEM INITIALIZATION
 // ========================================
 
-// Convert Google Drive folder link to API endpoint
-function getGoogleDriveFilesList(folderId) {
-  // Use Google Drive API v3 public access
-  return `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents&key=AIzaSyDummyKeyForPublicAccess&fields=files(id,name,mimeType)`;
+async function initializeRAGSystem() {
+  try {
+    const existingCount = await MedicalKnowledge.countDocuments();
+    
+    if (existingCount > 50) {
+      console.log(`✅ RAG System ready (${existingCount} chunks)`);
+      ragSystemInitialized = true;
+      return;
+    }
+
+    console.log('📚 RAG not initialized');
+    console.log('📝 To process your PDFs, call: POST /admin/process-pdfs');
+    console.log(`📂 ${MEDICAL_PDF_FILES.length} textbooks configured`);
+    
+    ragSystemInitialized = false;
+  } catch (error) {
+    console.error('❌ RAG init error:', error.message);
+  }
 }
 
-// Download file from Google Drive
+// ========================================
+// PDF PROCESSING
+// ========================================
+
+function extractKeywords(text) {
+  const keywords = [];
+  const terms = [
+    'diabetes', 'glucose', 'insulin', 'hyperglycemia', 'hypoglycemia',
+    'HbA1c', 'blood sugar', 'pancreas', 'type 1', 'type 2',
+    'metformin', 'glycemic', 'fasting', 'postprandial', 'complications',
+    'retinopathy', 'neuropathy', 'nephropathy', 'cardiovascular',
+    'diet', 'exercise', 'medication', 'management', 'monitoring'
+  ];
+
+  const lower = text.toLowerCase();
+  terms.forEach(term => {
+    if (lower.includes(term)) keywords.push(term);
+  });
+
+  return [...new Set(keywords)];
+}
+
 async function downloadFromGoogleDrive(fileId, filename) {
   try {
-    const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    console.log(`📥 Downloading ${filename}...`);
+    
+    const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
     
     const response = await axios({
       method: 'GET',
-      url: downloadUrl,
+      url: url,
       responseType: 'arraybuffer',
-      timeout: 60000 // 60 seconds
+      timeout: 120000
     });
 
     const filePath = path.join('/tmp', filename);
@@ -152,84 +183,26 @@ async function downloadFromGoogleDrive(fileId, filename) {
     console.log(`✅ Downloaded: ${filename}`);
     return filePath;
   } catch (error) {
-    console.error(`❌ Download failed for ${filename}:`, error.message);
+    console.error(`❌ Download failed: ${error.message}`);
     
-    // Try alternative download method
     try {
       const altUrl = `https://drive.google.com/u/0/uc?id=${fileId}&export=download&confirm=t`;
       const response = await axios({
         method: 'GET',
         url: altUrl,
         responseType: 'arraybuffer',
-        timeout: 60000
+        timeout: 120000
       });
       
       const filePath = path.join('/tmp', filename);
       fs.writeFileSync(filePath, response.data);
-      console.log(`✅ Downloaded (alt method): ${filename}`);
+      console.log(`✅ Downloaded (alt method)`);
       return filePath;
     } catch (altError) {
-      console.error(`❌ Alt download also failed: ${altError.message}`);
+      console.error(`❌ Alt download failed: ${altError.message}`);
       return null;
     }
   }
-}
-
-// Manual file IDs (extracted from your shared drive)
-// You'll need to get individual file IDs from Google Drive
-const MEDICAL_PDF_FILES = [
-  // Add your file IDs here after inspecting the shared folder
-  // Format: { fileId: 'xxx', filename: 'icmr_guidelines.pdf', source: 'ICMR_Guidelines' }
-];
-
-// Fallback: If we can't auto-detect, use direct links
-async function downloadMedicalPDFs() {
-  console.log('📚 Starting medical textbook download...');
-  
-  const downloadedFiles = [];
-  
-  // Method 1: Try to list files in folder (may require API key)
-  try {
-    // For now, we'll use manual specification
-    // In production, you'd either:
-    // 1. Make files publicly accessible with direct links
-    // 2. Use Google Drive API with service account
-    // 3. Upload files directly to server storage
-    
-    console.log('ℹ️  Note: For full automation, individual file IDs needed');
-    console.log('ℹ️  Please provide direct file links or individual file IDs');
-    
-  } catch (error) {
-    console.error('❌ Could not list Google Drive files:', error.message);
-  }
-  
-  return downloadedFiles;
-}
-
-// ========================================
-// PDF PROCESSING & RAG SYSTEM
-// ========================================
-
-function extractKeywords(text) {
-  const keywords = [];
-  const diabetesTerms = [
-    'diabetes', 'glucose', 'insulin', 'hyperglycemia', 'hypoglycemia',
-    'HbA1c', 'blood sugar', 'pancreas', 'type 1', 'type 2', 'mellitus',
-    'metformin', 'glycemic', 'fasting', 'postprandial', 'complications',
-    'retinopathy', 'neuropathy', 'nephropathy', 'cardiovascular',
-    'diet', 'exercise', 'medication', 'management', 'monitoring',
-    'glycosylated hemoglobin', 'oral glucose tolerance', 'self-monitoring',
-    'insulin resistance', 'beta cell', 'carbohydrate', 'lipid', 'protein'
-  ];
-
-  const lowerText = text.toLowerCase();
-  diabetesTerms.forEach(term => {
-    if (lowerText.includes(term)) {
-      keywords.push(term);
-    }
-  });
-
-  return [...new Set(keywords)];
 }
 
 async function processPDFFile(filePath, source) {
@@ -239,27 +212,19 @@ async function processPDFFile(filePath, source) {
     const dataBuffer = fs.readFileSync(filePath);
     const data = await pdfParse(dataBuffer);
     
-    // Split into meaningful chunks (paragraphs with context)
-    const text = data.text;
-    const chunks = [];
-    
-    // Split by double newlines (paragraphs)
-    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 150);
-    
-    // Group into chunks of 2-3 paragraphs for better context
-    for (let i = 0; i < paragraphs.length; i += 2) {
-      const chunk = paragraphs.slice(i, i + 2).join('\n\n');
-      if (chunk.length > 200) {
-        chunks.push(chunk);
-      }
-    }
+    console.log(`📄 Pages: ${data.numpages}`);
 
-    console.log(`📄 ${source}: ${chunks.length} chunks extracted`);
+    const paragraphs = data.text
+      .split(/\n\s*\n/)
+      .map(p => p.trim())
+      .filter(p => p.length > 200 && p.length < 2000);
 
-    // Store in database
-    let stored = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
+    console.log(`📦 ${paragraphs.length} chunks`);
+
+    let saved = 0;
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const chunk = paragraphs[i];
       const keywords = extractKeywords(chunk);
       
       if (keywords.length > 0) {
@@ -267,191 +232,90 @@ async function processPDFFile(filePath, source) {
           source,
           content: chunk,
           keywords,
-          pageNumber: Math.floor(i / 2),
+          pageNumber: Math.floor((i / paragraphs.length) * data.numpages),
           chunkIndex: i
         });
-        stored++;
+        saved++;
+      }
+
+      if ((i + 1) % 50 === 0) {
+        console.log(`   ${i + 1}/${paragraphs.length}`);
       }
     }
 
-    console.log(`✅ ${source}: Stored ${stored} chunks in database`);
+    console.log(`✅ ${source}: ${saved} chunks saved`);
     
-    // Clean up temp file
-    fs.unlinkSync(filePath);
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
     
-    return stored;
+    return saved;
   } catch (error) {
-    console.error(`❌ Error processing ${source}:`, error.message);
+    console.error(`❌ Processing error: ${error.message}`);
     return 0;
   }
 }
 
-// Initialize RAG system
-async function initializeRAGSystem() {
-  try {
-    console.log('🚀 Initializing RAG System...');
-    
-    // Check if medical knowledge already exists
-    const existingCount = await MedicalKnowledge.countDocuments();
-    
-    if (existingCount > 100) {
-      console.log(`✅ RAG System already initialized (${existingCount} chunks)`);
-      ragSystemInitialized = true;
-      return;
-    }
+// ========================================
+// ADMIN ENDPOINT - PROCESS YOUR PDFs
+// ========================================
 
-    console.log('📚 Medical knowledge base empty. Need to process PDFs.');
-    console.log('');
-    console.log('🔗 SETUP REQUIRED:');
-    console.log('Your Google Drive folder: https://drive.google.com/drive/folders/1Z2WciU7hJLGua1kQ61Q3ZnnPr2iMyy0Q');
-    console.log('');
-    console.log('To enable automatic PDF processing:');
-    console.log('1. Make each PDF file publicly accessible (right-click → Share → Anyone with link)');
-    console.log('2. Get individual file IDs for each PDF');
-    console.log('3. Call: POST /admin/process-google-drive-pdfs with file IDs');
-    console.log('');
-    console.log('OR upload PDFs directly via: POST /admin/upload-pdf');
-    console.log('');
+app.post('/admin/process-pdfs', async (req, res) => {
+  res.json({ 
+    status: 'started',
+    message: 'Processing your 4 medical textbooks. Check logs.',
+    files: MEDICAL_PDF_FILES.length
+  });
+
+  // Process in background
+  processAllPDFs();
+});
+
+async function processAllPDFs() {
+  console.log('\n🏥 PROCESSING YOUR MEDICAL PDFs\n');
+
+  let totalChunks = 0;
+
+  for (let i = 0; i < MEDICAL_PDF_FILES.length; i++) {
+    const file = MEDICAL_PDF_FILES[i];
     
-    ragSystemInitialized = false;
-  } catch (error) {
-    console.error('❌ RAG initialization error:', error.message);
-    ragSystemInitialized = false;
+    console.log(`\n[${i + 1}/${MEDICAL_PDF_FILES.length}] ${file.source}`);
+
+    const filePath = await downloadFromGoogleDrive(file.fileId, file.filename);
+    
+    if (filePath) {
+      const chunks = await processPDFFile(filePath, file.source);
+      totalChunks += chunks;
+    }
   }
+
+  ragSystemInitialized = totalChunks > 0;
+
+  console.log(`\n✅ DONE! ${totalChunks} total chunks\n`);
 }
 
-// ========================================
-// ADMIN ENDPOINTS FOR PDF UPLOAD
-// ========================================
-
-// Manual PDF upload endpoint
-app.post('/admin/upload-pdf', async (req, res) => {
-  try {
-    const { source, pdfUrl } = req.body;
-    
-    if (!source || !pdfUrl) {
-      return res.status(400).json({ 
-        error: 'Missing source or pdfUrl',
-        example: {
-          source: 'ICMR_Guidelines',
-          pdfUrl: 'https://drive.google.com/file/d/FILE_ID/view'
-        }
-      });
-    }
-
-    // Extract file ID from Google Drive URL
-    const fileIdMatch = pdfUrl.match(/\/file\/d\/([^\/]+)/);
-    if (!fileIdMatch) {
-      return res.status(400).json({ error: 'Invalid Google Drive URL' });
-    }
-
-    const fileId = fileIdMatch[1];
-    const filename = `${source}.pdf`;
-    
-    // Download PDF
-    const filePath = await downloadFromGoogleDrive(fileId, filename);
-    
-    if (!filePath) {
-      return res.status(500).json({ error: 'Download failed' });
-    }
-
-    // Process PDF
-    const chunksStored = await processPDFFile(filePath, source);
-    
-    if (chunksStored > 0) {
-      ragSystemInitialized = true;
-      res.json({ 
-        success: true, 
-        message: `Processed ${source}: ${chunksStored} chunks stored`,
-        source,
-        chunks: chunksStored
-      });
-    } else {
-      res.status(500).json({ error: 'No chunks could be stored' });
-    }
-    
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Batch process multiple PDFs
-app.post('/admin/process-all-pdfs', async (req, res) => {
-  try {
-    const { files } = req.body;
-    
-    if (!files || !Array.isArray(files)) {
-      return res.status(400).json({ 
-        error: 'Missing files array',
-        example: {
-          files: [
-            { source: 'ICMR_Guidelines', fileId: 'xxx' },
-            { source: 'Parks_PSM', fileId: 'yyy' }
-          ]
-        }
-      });
-    }
-
-    const results = [];
-    
-    for (const file of files) {
-      const { source, fileId } = file;
-      const filename = `${source}.pdf`;
-      
-      console.log(`Processing ${source}...`);
-      
-      const filePath = await downloadFromGoogleDrive(fileId, filename);
-      
-      if (filePath) {
-        const chunksStored = await processPDFFile(filePath, source);
-        results.push({ source, success: true, chunks: chunksStored });
-      } else {
-        results.push({ source, success: false, error: 'Download failed' });
-      }
-    }
-
-    if (results.some(r => r.success)) {
-      ragSystemInitialized = true;
-    }
-
-    res.json({ 
-      success: true, 
-      message: 'Batch processing complete',
-      results
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Check RAG system status
+// Check status
 app.get('/admin/rag-status', async (req, res) => {
-  try {
-    const totalChunks = await MedicalKnowledge.countDocuments();
-    const bySource = await MedicalKnowledge.aggregate([
-      { $group: { _id: '$source', count: { $sum: 1 } } }
-    ]);
+  const totalChunks = await MedicalKnowledge.countDocuments();
+  const bySource = await MedicalKnowledge.aggregate([
+    { $group: { _id: '$source', count: { $sum: 1 } } }
+  ]);
 
-    res.json({
-      initialized: ragSystemInitialized,
-      totalChunks,
-      bySource,
-      ready: totalChunks > 100
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  res.json({
+    initialized: ragSystemInitialized,
+    totalChunks,
+    bySource,
+    ready: totalChunks > 50,
+    files: MEDICAL_PDF_FILES.map(f => f.source)
+  });
 });
 
 // ========================================
-// RAG RETRIEVAL SYSTEM
+// RAG RETRIEVAL
 // ========================================
 
 async function retrieveMedicalKnowledge(query, topK = 5) {
   try {
-    // Full-text search
     const results = await MedicalKnowledge
       .find(
         { $text: { $search: query } },
@@ -461,49 +325,36 @@ async function retrieveMedicalKnowledge(query, topK = 5) {
       .limit(topK);
 
     if (results.length === 0) {
-      // Fallback: keyword search
       const keywords = extractKeywords(query);
       if (keywords.length > 0) {
-        const fallbackResults = await MedicalKnowledge
-          .find({ keywords: { $in: keywords } })
-          .limit(topK);
-        return fallbackResults;
+        return await MedicalKnowledge.find({ keywords: { $in: keywords } }).limit(topK);
       }
     }
 
     return results;
   } catch (error) {
-    console.error('❌ RAG retrieval error:', error.message);
     return [];
   }
 }
 
 // ========================================
-// TRIAGE SYSTEM
+// TRIAGE
 // ========================================
 
 function assessUrgency(glucose, symptoms = []) {
   if (glucose < 54 || glucose > 400) return 'EMERGENCY';
-  
-  if (symptoms.some(s => 
-    ['unconscious', 'confusion', 'seizure', 'chest pain', 'difficulty breathing'].includes(s.toLowerCase())
-  )) return 'EMERGENCY';
-
+  if (symptoms.some(s => ['unconscious', 'confusion', 'seizure'].includes(s.toLowerCase()))) {
+    return 'EMERGENCY';
+  }
   if (glucose < 70 || glucose > 250) return 'URGENT';
-  
-  if (symptoms.some(s => 
-    ['severe pain', 'vomiting', 'severe headache', 'vision loss'].includes(s.toLowerCase())
-  )) return 'URGENT';
-
   if (glucose > 180 || glucose < 80) return 'ROUTINE';
-
   return 'MONITORING';
 }
 
 async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medicalRefs) {
   const urgency = assessUrgency(glucose, symptoms);
   
-  const triage = await Triage.create({
+  await Triage.create({
     patientPhone: phone,
     urgencyLevel: urgency,
     symptoms,
@@ -513,16 +364,16 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
     physicianAlerted: urgency === 'EMERGENCY' || urgency === 'URGENT'
   });
 
-  console.log(`🏥 Triage: ${urgency} (${glucose} mg/dL)`);
-  return triage;
+  console.log(`🏥 Triage: ${urgency}`);
+  return urgency;
 }
 
-// Initialize Claude
+// ========================================
+// CLAUDE
+// ========================================
+
 async function initializeClaude() {
-  if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === 'your_anthropic_api_key_here') {
-    console.warn('⚠️  Claude API key not set');
-    return false;
-  }
+  if (!ANTHROPIC_API_KEY) return false;
 
   try {
     const response = await axios.post(CLAUDE_API_URL, {
@@ -534,31 +385,32 @@ async function initializeClaude() {
         'x-api-key': ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json'
-      },
-      timeout: 10000
+      }
     });
 
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
-      console.log(`✅ Claude Sonnet 4 ready`);
+      console.log('✅ Claude ready');
       return true;
     }
   } catch (error) {
-    console.error('❌ Claude failed:', error.response?.data?.error?.message || error.message);
+    console.error('❌ Claude failed');
   }
   return false;
 }
 
 initializeClaude();
 
-// Medical Thresholds
 const THRESHOLDS = {
   fasting: { critical_low: 70, critical_high: 250 },
   postprandial: { critical_low: 70, critical_high: 300 },
   random: { critical_low: 70, critical_high: 250 }
 };
 
-// WhatsApp
+// ========================================
+// WHATSAPP
+// ========================================
+
 async function sendWhatsAppMessage(to, message) {
   try {
     await axios.post(`https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`, {
@@ -567,88 +419,88 @@ async function sendWhatsAppMessage(to, message) {
       type: 'text',
       text: { body: message }
     }, { headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` } });
-    console.log(`✅ Sent to ${to}`);
+    console.log(`✅ Sent`);
   } catch (e) {
     console.error('❌ Send failed');
   }
 }
 
-// Fallback response
+// ========================================
+// FALLBACK
+// ========================================
+
 function fallbackResponse(msg) {
   const lower = msg.toLowerCase();
   const num = msg.match(/(\d{2,3})/);
   const glucose = num ? parseInt(num[1]) : null;
   
   if (lower.match(/^(hi|hello|namaste)/)) {
-    return `Hello! 🙏 I'm Gluco Sahayak with medical-grade guidance.\n\n📚 Evidence-based advice from medical textbooks\n📊 Log glucose\n🏥 Emergency protocols\n\nSend: "My sugar is 120" 😊`;
+    return `Hello! 🙏 Gluco Sahayak - Medical-grade diabetes assistant.\n\n📚 Evidence-based guidance\n📊 Glucose tracking\n🏥 Emergency protocols\n\nSend: "My sugar is 120" 😊`;
   }
   
   if (glucose && glucose >= 40 && glucose <= 500) {
     let r = `✅ Logged: ${glucose} mg/dL\n\n`;
     
-    if (glucose < 54) r += `🚨🚨 EMERGENCY! Severe hypoglycemia. Eat 15g carbs NOW. Call doctor immediately!`;
+    if (glucose < 54) r += `🚨🚨 EMERGENCY! Severe hypoglycemia. Eat 15g carbs NOW! Call doctor!`;
     else if (glucose < 70) r += `🚨 LOW! Eat 15g fast carbs. Rest 15min. Recheck.`;
-    else if (glucose <= 100) r += `✅ EXCELLENT! Normal range. Keep it up! 👏`;
-    else if (glucose <= 125) r += `⚠️ PREDIABETES. More vegetables, walk 30min daily, see doctor.`;
-    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet, exercise, medication.`;
-    else if (glucose <= 250) r += `🚨 HIGH! Drink water, avoid sweets, walk 15min, recheck in 2hr.`;
-    else if (glucose <= 400) r += `🚨🚨 SEVERE! Contact doctor NOW. Don't exercise. Watch for symptoms.`;
-    else r += `🚨🚨🚨 CRITICAL EMERGENCY! Go to ER immediately!`;
+    else if (glucose <= 100) r += `✅ EXCELLENT! Normal range 👏`;
+    else if (glucose <= 125) r += `⚠️ PREDIABETES. More veggies, walk 30min, see doctor.`;
+    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet, exercise, meds.`;
+    else if (glucose <= 250) r += `🚨 HIGH! Water, no sweets, walk 15min, recheck 2hr.`;
+    else if (glucose <= 400) r += `🚨🚨 SEVERE! Contact doctor NOW!`;
+    else r += `🚨🚨🚨 CRITICAL! Go to ER immediately!`;
     
     return r;
   }
   
-  return `How can I help? I provide evidence-based guidance.\n\n📊 "My sugar is 120"\n🍽️ "Diet advice"\n🚶 "Exercise tips"`;
+  return `How can I help?\n📊 "My sugar is 120"\n🍽️ "Diet advice"\n🚶 "Exercise tips"`;
 }
 
-// Enhanced Claude AI with RAG
+// ========================================
+// CLAUDE WITH RAG
+// ========================================
+
 async function analyzeWithClaudeRAG(phone, msg) {
   if (!isClaudeAvailable) return fallbackResponse(msg);
 
   try {
-    // Retrieve medical knowledge
     const medicalContext = ragSystemInitialized 
       ? await retrieveMedicalKnowledge(msg, 5)
       : [];
     
     const patient = await Patient.findOne({ phone });
     const readings = await GlucoseReading.find({ patientPhone: phone })
-      .sort({ timestamp: -1 })
-      .limit(5);
+      .sort({ timestamp: -1 }).limit(5);
 
-    // Build references section
     const references = medicalContext.length > 0
-      ? medicalContext.map(doc => 
-          `[${doc.source}]\n${doc.content.substring(0, 600)}...`
-        ).join('\n\n---\n\n')
-      : 'Medical knowledge base initializing. Using evidence-based protocols.';
+      ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 500)}...`).join('\n\n')
+      : 'Standard medical protocols.';
 
     const system = `You are Gluco Sahayak, medical-grade diabetes assistant.
 
-🏥 CRITICAL RULES:
-1. ONLY use information from medical textbook excerpts below
-2. ALWAYS cite source: [Source Name]
-3. If info not in excerpts, say "Based on standard protocols..." and be conservative
-4. Never invent medical facts
+🏥 RULES:
+1. Use ONLY information from textbook excerpts below
+2. Cite source: [Source Name]
+3. If no excerpt, say "Based on standard protocols"
+4. Safety warnings for critical glucose
 
-📚 MEDICAL TEXTBOOK EXCERPTS:
+📚 MEDICAL EXCERPTS:
 ${references}
 
-PATIENT DATA:
-- Name: ${patient?.name || 'New'}
+PATIENT:
+- ${patient?.name || 'New'}
 - Recent: ${readings.map(r => `${r.reading}mg/dL`).join(', ') || 'None'}
 
 PROTOCOL:
-1. Assess urgency if glucose mentioned
-2. Cite specific textbook source
-3. Evidence-based advice only
-4. Safety warnings for critical values
-5. Indian context: roti, dal, walking, yoga
-6. Max 150 words, warm but precise
+1. Assess urgency
+2. Cite textbook
+3. Evidence-based advice
+4. Indian context (roti, dal, yoga)
+5. Max 150 words
 
 User: "${msg}"
 
-Respond with medical citations:`;
+Respond with citations:`;
 
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
@@ -670,7 +522,7 @@ Respond with medical citations:`;
       return text;
     }
   } catch (e) {
-    console.error('❌ Claude error:', e.message);
+    console.error('❌ Claude error');
   }
   
   return fallbackResponse(msg);
@@ -686,10 +538,8 @@ function extractGlucose(msg) {
                lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
 
   const symptoms = [];
-  const symptomTerms = ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak', 
-                        'nausea', 'vomit', 'pain', 'confusion', 'headache'];
-  symptomTerms.forEach(term => {
-    if (lower.includes(term)) symptoms.push(term);
+  ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
+    if (lower.includes(s)) symptoms.push(s);
   });
 
   return { hasReading: true, reading, readingType: type, symptoms, notes: msg.substring(0, 200) };
@@ -698,39 +548,30 @@ function extractGlucose(msg) {
 async function checkCritical(reading, type, phone) {
   const t = THRESHOLDS[type] || THRESHOLDS.random;
   let critical = false;
-  let alert = '';
   let urgency = 'MONITORING';
 
-  if (reading < 54) {
+  if (reading < 54 || reading > 400) {
     critical = true;
     urgency = 'EMERGENCY';
-    alert = `🚨🚨 CRITICAL: SEVERE HYPOGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL\nLife threatening!`;
-  } else if (reading < t.critical_low) {
+  } else if (reading < t.critical_low || reading > t.critical_high) {
     critical = true;
     urgency = 'URGENT';
-    alert = `🚨 URGENT: HYPOGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL`;
-  } else if (reading > 400) {
-    critical = true;
-    urgency = 'EMERGENCY';
-    alert = `🚨🚨 CRITICAL: SEVERE HYPERGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL`;
-  } else if (reading > t.critical_high) {
-    critical = true;
-    urgency = 'URGENT';
-    alert = `🚨 URGENT: HYPERGLYCEMIA\nPatient: ${phone}\nReading: ${reading} mg/dL`;
   }
 
   if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
-    await sendWhatsAppMessage(PHYSICIAN_PHONE, alert);
-    console.log(`🏥 ${urgency} alert sent`);
+    await sendWhatsAppMessage(PHYSICIAN_PHONE, 
+      `🚨 ${urgency}\nPatient: ${phone}\nGlucose: ${reading} mg/dL`);
   }
 
   return { critical, urgency };
 }
 
-// Webhooks
+// ========================================
+// WEBHOOKS
+// ========================================
+
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
-    console.log('✅ Webhook OK');
     return res.status(200).send(req.query['hub.challenge']);
   }
   res.sendStatus(403);
@@ -753,18 +594,16 @@ app.post('/webhook', async (req, res) => {
     if (data.hasReading) {
       const { critical, urgency } = await checkCritical(data.reading, data.readingType, from);
       
-      const triage = await createTriageRecord(from, data.reading, data.symptoms, reply, []);
+      await createTriageRecord(from, data.reading, data.symptoms, reply, []);
 
-      const reading = new GlucoseReading({
+      await GlucoseReading.create({
         patientPhone: from,
         reading: data.reading,
         readingType: data.readingType,
         symptoms: data.symptoms,
         notes: data.notes,
-        alertSent: critical,
-        triageId: triage._id
+        alertSent: critical
       });
-      await reading.save();
       
       console.log(`✅ ${data.reading} (${urgency})`);
     }
@@ -776,15 +615,16 @@ app.post('/webhook', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    system: 'Medical RAG',
     ai: isClaudeAvailable ? 'Claude Sonnet 4' : 'fallback',
-    rag: ragSystemInitialized ? 'ready' : 'needs PDF processing',
-    db: mongoose.connection.readyState === 1 ? 'ok' : 'connecting',
-    setup: !ragSystemInitialized ? 'POST /admin/upload-pdf to add textbooks' : 'complete'
+    rag: ragSystemInitialized ? 'ready' : 'call POST /admin/process-pdfs',
+    files: MEDICAL_PDF_FILES.length
   });
 });
 
-// Reminders
+// ========================================
+// REMINDERS
+// ========================================
+
 cron.schedule('0 8 * * *', async () => {
   const patients = await Patient.find({ 'reminderPreferences.medication': true });
   for (const p of patients) {
@@ -799,7 +639,7 @@ cron.schedule('0 20 * * *', async () => {
       patientPhone: p.phone,
       timestamp: { $gte: new Date().setHours(0,0,0,0) }
     });
-    if (!today) await sendWhatsAppMessage(p.phone, "🌙 Log glucose today! 😊");
+    if (!today) await sendWhatsAppMessage(p.phone, "🌙 Log glucose! 😊");
   }
 });
 
@@ -809,8 +649,7 @@ app.listen(PORT, () => console.log(`
 ╠════════════════════════════════╣
 ║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}                ║
 ║  RAG: ${ragSystemInitialized ? '✅' : '⚠️ '}                   ║
-║  DB: ${mongoose.connection.readyState === 1 ? '✅' : '⏳'}                     ║
-╠════════════════════════════════╣
-║  Setup: ${!ragSystemInitialized ? 'Upload PDFs needed' : 'Complete'}  ║
+║  Files: ${MEDICAL_PDF_FILES.length}                  ║
 ╚════════════════════════════════╝
+To process PDFs: POST /admin/process-pdfs
 `));
