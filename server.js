@@ -1630,9 +1630,3 @@ app.listen(PORT, () => console.log(`
 ║    ✅ No repeated greetings           ║
 ║    ✅ Admin endpoints                 ║
 ╚════════════════════════════════════════╝
-
-🎉 PRODUCTION READY!
-📝 Process PDFs: POST /admin/process-pdfs
-🔧 Reset user: POST /admin/reset-user
-📊 Status: GET /admin/health
-`));
