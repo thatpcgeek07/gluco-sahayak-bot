@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const cron = require('node-cron');
@@ -1630,3 +1630,9 @@ app.listen(PORT, () => console.log(`
 ║    ✅ No repeated greetings           ║
 ║    ✅ Admin endpoints                 ║
 ╚════════════════════════════════════════╝
+
+🎉 PRODUCTION READY!
+📝 Process PDFs: POST /admin/process-pdfs
+🔧 Reset user: POST /admin/reset-user
+📊 Status: GET /admin/health
+`));
