@@ -1,7 +1,7 @@
-{
+
   "name": "gluco-sahayak-bot",
   "version": "5.0.0",
-  "description": "WhatsApp diabetes bot with AI",
+  "description": "WhatsApp diabetes bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -18,38 +18,3 @@
   "engines": {
     "node": ">=18.0.0"
   }
-}
-```
-
-5. **Commit** with message: "Fixed package.json"
-
----
-
-### **Step 2: Did You Paste the server.js Code?**
-
-**After deleting the old server.js, did you paste the NEW code from `server-FINAL-PRODUCTION.js`?**
-
-If **NO**:
-1. Go back to GitHub server.js
-2. Click Edit
-3. Download `server-FINAL-PRODUCTION.js` file I shared
-4. Open it, copy ALL the code
-5. Paste into GitHub server.js
-6. Commit
-
-If **YES**, great! Just update package.json and it should work.
-
----
-
-## **After Both Files Updated:**
-
-**Render will auto-deploy in 2 minutes.**
-
-**Check logs - should see:**
-```
-✅ MongoDB connected
-✅ Claude Sonnet 4 ready
-✅ Voice: ✅ FREE
-
-GLUCO SAHAYAK v5.0 FINAL
-Server ready!
