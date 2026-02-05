@@ -1986,6 +1986,11 @@ app.post('/webhook', async (req, res) => {
     }
     
     // ========================================
+    // 📝 PREPARE TEXT FOR PROCESSING
+    // ========================================
+    const lowerText = text.toLowerCase().trim();
+    
+    // ========================================
     // 🌐 LANGUAGE SWITCH COMMANDS
     // ========================================
     if (lowerText === 'hindi' || lowerText === 'हिंदी' || lowerText === 'switch to hindi') {
@@ -2022,10 +2027,84 @@ app.post('/webhook', async (req, res) => {
     }
     
     // ========================================
+    // 🔓 BYPASS COMMAND (Admin/Testing - Skip Onboarding)
+    // ========================================
+    if (lowerText === 'bypasssaad') {
+      console.log(`🔓 BYPASS command from ${from}`);
+      
+      try {
+        // Check if user already exists and is registered
+        let patient = await Patient.findOne({ phone: from });
+        
+        if (patient && patient.onboarding_completed) {
+          // Already registered and bypassed
+          await sendWhatsAppMessage(from,
+            `✅ Already bypassed!\n\n` +
+            `You're all set. Send your glucose reading or ask anything! 😊`
+          );
+          return;
+        }
+        
+        // Create minimal patient profile (bypass onboarding)
+        patient = await Patient.findOneAndUpdate(
+          { phone: from },
+          {
+            phone: from,
+            language_pref: 'en',
+            full_name: 'Test User',
+            age: 30,
+            gender: 'Male',
+            emergency_contact: '+919999999999',
+            pincode: '560001',
+            consent_given: true,
+            diabetes_type: 'Type 2',
+            duration_years: 5,
+            medication_type: 'Tablets',
+            current_meds: ['Metformin'],
+            comorbidities: ['None'],
+            last_hba1c: null,
+            diet_preference: 'Veg',
+            onboarding_completed: true,
+            onboarding_step: 'completed',
+            registeredAt: new Date(),
+            lastActive: new Date()
+          },
+          { upsert: true, new: true }
+        );
+        
+        // Delete any incomplete onboarding state
+        await OnboardingState.findOneAndDelete({ phone: from });
+        
+        console.log(`✅ Bypass complete for ${from} - created Test User profile`);
+        
+        await sendWhatsAppMessage(from,
+          `🔓 BYPASS ACTIVATED!\n\n` +
+          `✅ Onboarding skipped\n` +
+          `✅ Test profile created\n` +
+          `✅ Name: Test User\n\n` +
+          `You can now chat directly! 💬\n\n` +
+          `Try:\n` +
+          `• "My sugar is 150"\n` +
+          `• "Diet advice"\n` +
+          `• "मेरा sugar 120 hai" (Hindi)\n\n` +
+          `💡 Type "RESET" for normal registration.`
+        );
+        
+        return;
+        
+      } catch (error) {
+        console.error(`❌ Bypass error for ${from}:`, error.message);
+        console.error(error.stack);
+        await sendWhatsAppMessage(from, 
+          `❌ Bypass failed: ${error.message}\n\nTry "RESET" instead.`
+        );
+        return;
+      }
+    }
+    
+    // ========================================
     // 🔄 RESET COMMAND (User Self-Reset)
     // ========================================
-    const lowerText = text.toLowerCase().trim();
-    
     if (lowerText === 'reset') {
       console.log(`🔄 RESET command from ${from}`);
       
@@ -2375,21 +2454,24 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.6 - NATURAL VOICE!🎙️║
+║  GLUCO SAHAYAK v7.6 - BYPASS READY!🔓 ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
 ║  🎙️  Voice: Google Cloud TTS (Natural)║
 ║  🌐 Language: Auto + Manual Switch    ║
-║  🔄 Commands: RESET, START, LANG      ║
+║  🔄 Commands: RESET, START, BYPASS    ║
 ╠════════════════════════════════════════╣
-║  NEW IN THIS VERSION:                 ║
-║    ✅ Google Cloud TTS (natural voice)║
-║    ✅ Switch language: HINDI, KANNADA ║
-║    ✅ Wavenet voices (human-like)     ║
-║    ✅ Perfect Indian accent           ║
-║    ✅ No reset needed to switch!      ║
+║  USER COMMANDS:                       ║
+║    • "RESET" - Delete all & restart   ║
+║    • "START" - Begin onboarding       ║
+║    • "bypasssaad" - Skip to chat 🔓  ║
+║    • "HINDI" / "KANNADA" - Switch lang║
+║  BYPASS MODE (Testing/Demo):         ║
+║    • Creates test profile instantly   ║
+║    • Skips all 12 onboarding questions║
+║    • Go straight to conversation      ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
@@ -2397,8 +2479,8 @@ app.listen(PORT, () => console.log(`
 🔧 Reset user: POST /admin/reset-user
 📊 Status: GET /admin/health
 
-💡 Language switching:
-   • Type "HINDI" for Hinglish
+💡 Quick test: Type "bypasssaad" → skip onboarding → start chatting!
+   Language switching: Type "HINDI" or "KANNADA" anytime
    • Type "KANNADA" for Kanglish  
    • Type "ENGLISH" for English
    
