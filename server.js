@@ -784,6 +784,50 @@ function parseHbA1c(message) {
 }
 
 // ========================================
+// 🌐 LANGUAGE DETECTION (AUTO-UPDATE)
+// ========================================
+
+function detectLanguage(message) {
+  const text = message.toLowerCase();
+  
+  // Hindi indicators
+  const hindiWords = ['मेरा', 'है', 'में', 'का', 'को', 'से', 'के', 'की', 'हूं', 'हैं', 
+                      'था', 'थी', 'गया', 'गई', 'kya', 'mera', 'aur', 'nahi', 'haan'];
+  const hindiChars = /[\u0900-\u097F]/; // Devanagari script
+  
+  // Kannada indicators
+  const kannadaWords = ['ನನ್ನ', 'ನಾನು', 'ಇದೆ', 'ಆಗಿದೆ', 'ಮಾಡಿ', 'ಹೇಗೆ', 'ಏನು'];
+  const kannadaChars = /[\u0C80-\u0CFF]/; // Kannada script
+  
+  // Check for scripts first (most reliable)
+  if (hindiChars.test(text)) return 'hi';
+  if (kannadaChars.test(text)) return 'kn';
+  
+  // Check for words
+  const hindiCount = hindiWords.filter(word => text.includes(word)).length;
+  const kannadaCount = kannadaWords.filter(word => text.includes(word)).length;
+  
+  if (hindiCount >= 2) return 'hi';
+  if (kannadaCount >= 2) return 'kn';
+  
+  // Default to English
+  return 'en';
+}
+
+async function updateLanguagePreference(phone, detectedLang, currentLang) {
+  // Only update if language changed
+  if (detectedLang !== currentLang) {
+    await Patient.findOneAndUpdate(
+      { phone },
+      { language_pref: detectedLang }
+    );
+    console.log(`🌐 Language updated: ${currentLang} → ${detectedLang} for ${phone}`);
+    return true;
+  }
+  return false;
+}
+
+// ========================================
 // ✅ RELIABLE ONBOARDING HANDLER (FIXED!)
 // ========================================
 
@@ -1342,26 +1386,26 @@ function fallbackResponse(msg) {
   const num = msg.match(/(\d{2,3})/);
   const glucose = num ? parseInt(num[1]) : null;
   
-  if (lower === 'hi' || lower === 'hello' || lower === 'hey') {
-    return `Hello! 🏥 Gluco Sahayak\n\n📊 Send: "My sugar is 120"\n🍽️ Ask: "Diet advice"\n🎙️ Use voice messages`;
+  if (lower === 'hi' || lower === 'hello' || lower === 'hey' || lower === 'नमस्ते' || lower === 'ನಮಸ್ಕಾರ') {
+    return `Namaste! 👋 Send your sugar reading or ask me anything.`;
   }
   
   if (glucose && glucose >= 40 && glucose <= 500) {
-    let r = `Reading: ${glucose} mg/dL\n\n`;
+    let r = `${glucose} mg/dL - `;
     
-    if (glucose < 54) r += `🚨🚨 EMERGENCY! Eat 15g carbs NOW!`;
-    else if (glucose < 70) r += `🚨 LOW! Eat 15g fast carbs.`;
-    else if (glucose <= 100) r += `✅ EXCELLENT! Normal 👏`;
-    else if (glucose <= 125) r += `⚠️ Slightly elevated. Watch diet.`;
-    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet.`;
-    else if (glucose <= 250) r += `🚨 HIGH! Water, walk, recheck.`;
-    else if (glucose <= 400) r += `🚨🚨 SEVERE! Contact doctor!`;
-    else r += `🚨🚨🚨 CRITICAL! Go to ER!`;
+    if (glucose < 54) r += `🚨 Very LOW! Eat something sweet NOW!`;
+    else if (glucose < 70) r += `⚠️ Low. Eat 3 biscuits now.`;
+    else if (glucose <= 100) r += `✅ Perfect!`;
+    else if (glucose <= 140) r += `👍 Good!`;
+    else if (glucose <= 180) r += `⚠️ High. Walk 10 mins.`;
+    else if (glucose <= 250) r += `🚨 Very high! Walk & drink water.`;
+    else if (glucose <= 400) r += `🚨🚨 Call doctor NOW!`;
+    else r += `🚨🚨🚨 Go to hospital!`;
     
     return r;
   }
   
-  return `I can help with:\n📊 Glucose tracking\n🍽️ Diet advice\n💊 Medication guidance\n🎙️ Voice messages`;
+  return `Send your sugar reading 📊 or ask questions about diet, medicine, etc.`;
 }
 
 async function analyzeWithClaudeRAG(phone, msg, patient) {
@@ -1464,47 +1508,56 @@ GLUCOSE READINGS (TIME-AWARE):
 ${glucoseSummary}
 `;
     
-    const system = `You are Gluco Sahayak, medical diabetes assistant.
+    const system = `You are Gluco Sahayak - a friendly, simple diabetes helper for elderly and rural people.
 
-CRITICAL RULES FOR CONVERSATION MEMORY:
-1. 🧠 REMEMBER EVERYTHING from conversation history - this is MANDATORY
-2. 🚫 NEVER repeat recommendations already given
-3. 🔄 BUILD ON previous discussion - reference what patient told you
-4. ✅ If patient mentions equipment (pump, CGM) - ACKNOWLEDGE IT in all future responses
-5. ✅ If patient provides updates (weight change, new symptoms) - UPDATE your advice
-6. 🕐 DISTINGUISH between TODAY vs YESTERDAY vs LAST WEEK readings
-7. ⚠️ Don't alarm about old readings - focus on current status
+CRITICAL: RESPOND IN ${patient.language_pref === 'hi' ? 'HINGLISH (Hindi + English mix)' : patient.language_pref === 'kn' ? 'KANGLISH (Kannada + English mix)' : 'SIMPLE ENGLISH'}
 
-EXAMPLE - CORRECT BEHAVIOR:
-User: "I'm on insulin pump"
-Assistant: [acknowledges pump]
-User: "I gained weight"
-Assistant: "Given your insulin pump settings and weight gain..." ✅
+${patient.language_pref === 'hi' ? `HINGLISH EXAMPLES:
+✅ "Aapka sugar 180 hai, thoda high. 10 minute walk karo aur paani piyo."
+✅ "Bilkul theek hai! Aise hi continue karo."
+✅ "Bohot zyada low hai! Turant meetha khao - 3 biscuit ya chini wala chai."
 
-EXAMPLE - WRONG BEHAVIOR:
-User: "I'm on insulin pump"  
-Assistant: [acknowledges pump]
-User: "I gained weight"
-Assistant: "You need to start insulin therapy" ❌ WRONG - they already have pump!
+Use words like: aapka, hai, karo/karna, piyo/peena, khao/khana, theek, zyada, kam` : ''}
 
-MEDICAL GUIDANCE:
-8. ALWAYS use medical textbook excerpts below
-9. ALWAYS cite source [Reference Name]
-10. Address patient by name
-11. Consider FULL patient profile AND conversation history
-12. Personalize for meds/comorbidities/diet
-13. Indian context (roti, dal, walk)
-14. Max 150 words
-15. NEVER start with greetings - START DIRECTLY with medical advice
+${patient.language_pref === 'kn' ? `KANGLISH EXAMPLES:
+✅ "Nimmadu 180, slightly high. 10 minute walk maadi, water kuDi."
+✅ "Perfect ide! Maintain maadi."
 
-MEDICAL TEXTBOOK EXCERPTS:
+Use words like: nimmadu, ide, maadi, kuDi, chennaagide, jaasthi, kammi` : ''}
+
+CONVERSATION STYLE - CRITICAL:
+🗣️ MAXIMUM 40-50 WORDS ONLY - Like WhatsApp message
+✅ Simple words - like talking to parent/grandparent
+✅ ONE action point only
+✅ Warm, friendly tone
+❌ NO medical jargon
+❌ NO long sentences
+❌ NO lists
+
+MEMORY RULES:
+• Remember conversation history
+• Don't repeat old advice
+• Focus on TODAY, not old readings
+
+RESPONSE FORMAT:
+1. Name + reading comment (if given)
+2. ONE simple action
+3. That's it!
+
+GOOD EXAMPLES:
+
+English: "Ramesh, 95 is perfect! Keep taking your medicine. Check again tomorrow morning."
+
+Hinglish: "Sunita ji, 220 bohot high hai. Doctor ko abhi phone karo. Paani piyo aur walk karo."
+
+${patient.language_pref === 'en' ? '' : 'REMEMBER: Use MIXED language (English + ' + (patient.language_pref === 'hi' ? 'Hindi' : 'Kannada') + ') - this is how people actually talk!'}
+
+MEDICAL CONTEXT:
 ${references}
 
 ${patientProfile}
 
-REMEMBER: You have access to the full conversation history. Use it to provide contextual, personalized advice that builds on what you already know about the patient.
-
-START DIRECTLY with patient's name and medical advice. NO greetings.`;
+Keep it SHORT and NATURAL - like a helpful neighbor, not a doctor!`;
     
     // ========================================
     // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
@@ -1532,9 +1585,9 @@ START DIRECTLY with patient's name and medical advice. NO greetings.`;
     // ========================================
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
-      max_tokens: 600,
+      max_tokens: 200,  // ✅ Reduced from 600 for concise responses
       system,
-      messages: conversationHistory  // ✅ NOW INCLUDES HISTORY!
+      messages: conversationHistory
     }, {
       headers: {
         'x-api-key': ANTHROPIC_API_KEY,
@@ -1731,6 +1784,18 @@ app.post('/webhook', async (req, res) => {
     
     // PROCESS WITH CLAUDE + RAG
     const patient = onboardingStatus.patient;
+    
+    // ========================================
+    // 🌐 AUTO-DETECT AND UPDATE LANGUAGE
+    // ========================================
+    const detectedLang = detectLanguage(text);
+    const currentLang = patient.language_pref || 'en';
+    
+    if (detectedLang !== currentLang) {
+      await updateLanguagePreference(from, detectedLang, currentLang);
+      patient.language_pref = detectedLang; // Update for current response
+    }
+    
     const reply = await analyzeWithClaudeRAG(from, text, patient);
     
     if (!reply || reply.length === 0) {
@@ -1870,16 +1935,18 @@ app.get('/admin/conversation/:phone', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.2.0-FIXED',
-    onboarding: 'Simple & Fast (NO AI) - ✅ CRASH FIXED',
-    medical: 'Claude + RAG + Conversation Memory',
+    version: '7.3.0-NATURAL',
+    onboarding: 'Simple & Fast (NO AI)',
+    medical: 'Claude + RAG + Auto Language Detection',
     voice: OPENAI_API_KEY ? 'enabled' : 'disabled',
     features: {
-      onboarding: '✅ Reliable (no AI dependency) - FIXED!',
-      medical_ai: '✅ Claude + RAG',
+      onboarding: '✅ Reliable',
+      medical_ai: '✅ Claude + RAG - SHORT responses',
       conversation_memory: '✅ Remembers context',
       voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled (add OpenAI credits)',
-      multilang: '✅ EN/HI/KN',
+      multilang: '✅ EN/HI/KN + Auto-detect',
+      language_switching: '✅ Auto-updates based on user language',
+      response_style: '✅ Short & conversational (40-50 words)',
       triage: '✅ Automatic'
     }
   });
@@ -1924,17 +1991,20 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.2 - FIXED! ✅       ║
+║  GLUCO SAHAYAK v7.3 - NATURAL! 🗣️     ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
 ║  🎙️  Voice: ${OPENAI_API_KEY ? '✅' : '❌'}                      ║
+║  🌐 Auto Language: ✅                 ║
 ╠════════════════════════════════════════╣
-║  FIXES IN THIS VERSION:               ║
-║    ✅ Onboarding crash FIXED!         ║
-║    ✅ Better voice error messages     ║
-║    ✅ All original features intact    ║
+║  NEW IN THIS VERSION:                 ║
+║    ✅ SHORT responses (40-50 words)   ║
+║    ✅ Auto language detection         ║
+║    ✅ Hinglish/Kanglish support       ║
+║    ✅ Conversational tone             ║
+║    ✅ Perfect for elderly/rural users ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
