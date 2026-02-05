@@ -206,7 +206,7 @@ async function downloadWhatsAppAudio(mediaId) {
 
 async function transcribeWhatsAppAudio(mediaId, language = 'en') {
   try {
-    console.log(`👂 Transcribing with Whisper (${language})...`);
+    console.log(`👂 Transcribing with Whisper (auto-detect)...`);
     
     if (!OPENAI_API_KEY) {
       throw new Error('OPENAI_API_KEY not set - voice features disabled');
@@ -218,8 +218,9 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
     form.append('file', fs.createReadStream(audioFilePath));
     form.append('model', 'whisper-1');
     
-    const languageMap = { 'en': 'en', 'hi': 'hi', 'kn': 'kn' };
-    form.append('language', languageMap[language] || 'en');
+    // ✅ DON'T specify language - let Whisper auto-detect!
+    // This allows users to speak any language regardless of their registered preference
+    // form.append('language', ...) // REMOVED!
     
     const response = await axios.post(
       'https://api.openai.com/v1/audio/transcriptions',
@@ -256,9 +257,70 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
 }
 
 async function speakResponse(text, language = 'en') {
+  try {
+    console.log(`🗣️  Generating speech with OpenAI TTS (${language})...`);
+    
+    if (!OPENAI_API_KEY) {
+      throw new Error('OpenAI API key required for voice');
+    }
+    
+    // OpenAI TTS voices - much better quality!
+    const voiceMap = {
+      'en': 'alloy',    // Clear American English
+      'hi': 'nova',     // Works well for Hindi
+      'kn': 'nova'      // Works well for Kannada
+    };
+    
+    const voice = voiceMap[language] || 'alloy';
+    
+    // Call OpenAI TTS API
+    const response = await axios.post(
+      'https://api.openai.com/v1/audio/speech',
+      {
+        model: 'tts-1',  // Faster, cheaper model
+        voice: voice,
+        input: text,
+        speed: 0.9  // Slightly slower for elderly users
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'arraybuffer',
+        timeout: 30000
+      }
+    );
+    
+    // Save audio file
+    const tempDir = '/tmp/whatsapp-tts';
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const timestamp = Date.now();
+    const fileName = `tts_${language}_${timestamp}.mp3`;
+    const filePath = path.join(tempDir, fileName);
+    
+    fs.writeFileSync(filePath, response.data);
+    
+    console.log(`✅ Speech generated (OpenAI TTS)`);
+    return filePath;
+    
+  } catch (error) {
+    console.error('❌ OpenAI TTS error:', error.message);
+    
+    // Fallback to gTTS if OpenAI fails
+    console.log('⚠️  Falling back to gTTS...');
+    return await speakResponseGTTS(text, language);
+  }
+}
+
+// Fallback gTTS function (if OpenAI TTS fails)
+async function speakResponseGTTS(text, language = 'en') {
   return new Promise((resolve, reject) => {
     try {
-      console.log(`🗣️  Generating speech (${language})...`);
+      console.log(`🗣️  Generating speech with gTTS (${language})...`);
       
       const langMap = { 'en': 'en', 'hi': 'hi', 'kn': 'kn' };
       const lang = langMap[language] || 'en';
@@ -271,21 +333,21 @@ async function speakResponse(text, language = 'en') {
       }
       
       const timestamp = Date.now();
-      const fileName = `tts_${language}_${timestamp}.mp3`;
+      const fileName = `tts_gtts_${language}_${timestamp}.mp3`;
       const filePath = path.join(tempDir, fileName);
       
       gttsInstance.save(filePath, (err) => {
         if (err) {
-          console.error('❌ TTS error:', err);
+          console.error('❌ gTTS error:', err);
           reject(new Error('Failed to generate speech'));
           return;
         }
         
-        console.log(`✅ Speech generated`);
+        console.log(`✅ Speech generated (gTTS)`);
         resolve(filePath);
       });
     } catch (error) {
-      console.error('❌ TTS error:', error.message);
+      console.error('❌ gTTS error:', error.message);
       reject(new Error('Failed to generate speech'));
     }
   });
@@ -496,7 +558,9 @@ I'll help you with:
 🚨 Emergency alerts
 🎙️ Voice messages (send audio!)
 
-Ready to start! What's your current glucose reading?`,
+Ready to start! What's your current glucose reading?
+
+💡 Tip: Type "RESET" anytime to start fresh.`,
     hi: `✅ हो गया {name} जी!
 
 Profile तैयार! 🎉
@@ -508,7 +572,9 @@ Profile तैयार! 🎉
 🚨 Emergency alert
 🎙️ Voice messages
 
-तैयार! Current glucose reading?`,
+तैयार! Current glucose reading?
+
+💡 "RESET" लिखें नया शुरू करने के लिए।`,
     kn: `✅ ಮುಗಿಯಿತು {name}!
 
 Profile ready! 🎉
@@ -520,7 +586,9 @@ Profile ready! 🎉
 🚨 Emergency alert
 🎙️ Voice messages
 
-ತಯಾರು! Current glucose reading?`
+ತಯಾರು! Current glucose reading?
+
+💡 "RESET" ಹೊಸದಾಗಿ ಪ್ರಾರಂಭಿಸಲು.`
   },
   
   error_retry: {
@@ -790,25 +858,66 @@ function parseHbA1c(message) {
 function detectLanguage(message) {
   const text = message.toLowerCase();
   
-  // Hindi indicators
-  const hindiWords = ['मेरा', 'है', 'में', 'का', 'को', 'से', 'के', 'की', 'हूं', 'हैं', 
-                      'था', 'थी', 'गया', 'गई', 'kya', 'mera', 'aur', 'nahi', 'haan'];
+  // Hindi indicators - including both Devanagari and romanized
+  const hindiWords = [
+    // Devanagari
+    'मेरा', 'है', 'में', 'का', 'को', 'से', 'के', 'की', 'हूं', 'हैं', 
+    'था', 'थी', 'गया', 'गई', 'हो', 'ही', 'तो', 'यह', 'वह', 'कर',
+    'था', 'हुआ', 'हुई', 'होना', 'करना', 'लेना', 'देना',
+    // Romanized/Hinglish
+    'mera', 'hai', 'mein', 'ka', 'ko', 'se', 'ke', 'ki', 'hoon', 'hain',
+    'kya', 'kaise', 'kab', 'kahan', 'kyun', 'aur', 'nahi', 'haan', 'ji',
+    'aapka', 'aapko', 'mere', 'tera', 'tumhara', 'uska', 'iske',
+    'bohot', 'bahut', 'thoda', 'zyada', 'kam', 'bilkul', 'abhi', 'turant',
+    'karo', 'karna', 'piyo', 'peena', 'khao', 'khana', 'bataiye', 'batao',
+    'theek', 'achha', 'accha', 'sahi', 'galat'
+  ];
   const hindiChars = /[\u0900-\u097F]/; // Devanagari script
   
   // Kannada indicators
-  const kannadaWords = ['ನನ್ನ', 'ನಾನು', 'ಇದೆ', 'ಆಗಿದೆ', 'ಮಾಡಿ', 'ಹೇಗೆ', 'ಏನು'];
+  const kannadaWords = [
+    'ನನ್ನ', 'ನಾನು', 'ಇದೆ', 'ಆಗಿದೆ', 'ಮಾಡಿ', 'ಹೇಗೆ', 'ಏನು',
+    'ನಿಮ್ಮ', 'ನಿಮ್ಮದು', 'ಅವರ', 'ನಮ್ಮ', 'ತುಂಬಾ', 'ಸ್ವಲ್ಪ',
+    // Romanized/Kanglish
+    'nimmadu', 'nannu', 'naanu', 'ide', 'aagide', 'maadi', 'maadu',
+    'hege', 'enu', 'ella', 'chennaagide', 'tumba', 'swalpa',
+    'jaasthi', 'kammi', 'kuDi', 'kuDu', 'tini', 'tinnu'
+  ];
   const kannadaChars = /[\u0C80-\u0CFF]/; // Kannada script
   
   // Check for scripts first (most reliable)
-  if (hindiChars.test(text)) return 'hi';
-  if (kannadaChars.test(text)) return 'kn';
+  if (hindiChars.test(text)) {
+    console.log('🌐 Detected Hindi script');
+    return 'hi';
+  }
+  if (kannadaChars.test(text)) {
+    console.log('🌐 Detected Kannada script');
+    return 'kn';
+  }
   
-  // Check for words
-  const hindiCount = hindiWords.filter(word => text.includes(word)).length;
-  const kannadaCount = kannadaWords.filter(word => text.includes(word)).length;
+  // Check for words (works for romanized text)
+  const hindiCount = hindiWords.filter(word => {
+    // Use word boundaries to avoid partial matches
+    const regex = new RegExp('\\b' + word + '\\b', 'i');
+    return regex.test(text);
+  }).length;
   
-  if (hindiCount >= 2) return 'hi';
-  if (kannadaCount >= 2) return 'kn';
+  const kannadaCount = kannadaWords.filter(word => {
+    const regex = new RegExp('\\b' + word + '\\b', 'i');
+    return regex.test(text);
+  }).length;
+  
+  console.log(`🌐 Language detection: Hindi=${hindiCount} words, Kannada=${kannadaCount} words`);
+  
+  // Need at least 2 matching words to switch language
+  if (hindiCount >= 2) {
+    console.log('🌐 Detected Hindi/Hinglish');
+    return 'hi';
+  }
+  if (kannadaCount >= 2) {
+    console.log('🌐 Detected Kannada/Kanglish');
+    return 'kn';
+  }
   
   // Default to English
   return 'en';
@@ -1508,56 +1617,89 @@ GLUCOSE READINGS (TIME-AWARE):
 ${glucoseSummary}
 `;
     
-    const system = `You are Gluco Sahayak - a friendly, simple diabetes helper for elderly and rural people.
+    // ========================================
+    // 🎯 LANGUAGE-SPECIFIC RESPONSE RULES
+    // ========================================
+    let languageInstruction = '';
+    let responseExample = '';
+    
+    if (patient.language_pref === 'hi') {
+      languageInstruction = `
+⚠️ CRITICAL: RESPOND IN HINGLISH (Hindi + English mix) ⚠️
 
-CRITICAL: RESPOND IN ${patient.language_pref === 'hi' ? 'HINGLISH (Hindi + English mix)' : patient.language_pref === 'kn' ? 'KANGLISH (Kannada + English mix)' : 'SIMPLE ENGLISH'}
+YOU MUST respond in Hinglish - NOT pure English, NOT pure Hindi.
+Mix Hindi and English naturally like people talk in India.
 
-${patient.language_pref === 'hi' ? `HINGLISH EXAMPLES:
-✅ "Aapka sugar 180 hai, thoda high. 10 minute walk karo aur paani piyo."
-✅ "Bilkul theek hai! Aise hi continue karo."
-✅ "Bohot zyada low hai! Turant meetha khao - 3 biscuit ya chini wala chai."
+MANDATORY HINGLISH WORDS TO USE:
+- aapka/tumhara (your)
+- hai/hain (is/are)  
+- karo/karna (do)
+- piyo/peena (drink)
+- khao/khana (eat)
+- theek (okay/fine)
+- zyada (more)
+- kam (less)
+- bohot (very)
+- turant (immediately)
+- abhi (now)
 
-Use words like: aapka, hai, karo/karna, piyo/peena, khao/khana, theek, zyada, kam` : ''}
+KEEP MEDICAL TERMS IN ENGLISH: sugar, medicine, doctor, hospital`;
 
-${patient.language_pref === 'kn' ? `KANGLISH EXAMPLES:
-✅ "Nimmadu 180, slightly high. 10 minute walk maadi, water kuDi."
-✅ "Perfect ide! Maintain maadi."
+      responseExample = `
+EXAMPLE - User says: "Mera sugar 180 hai"
+YOU MUST RESPOND: "Aapka sugar 180 hai, thoda high. 10 minute walk karo aur paani piyo. Rice kam khao."
 
-Use words like: nimmadu, ide, maadi, kuDi, chennaagide, jaasthi, kammi` : ''}
+DO NOT RESPOND: "Your sugar is 180, slightly high..." ❌ WRONG - this is pure English!`;
+      
+    } else if (patient.language_pref === 'kn') {
+      languageInstruction = `
+⚠️ CRITICAL: RESPOND IN KANGLISH (Kannada + English mix) ⚠️
 
-CONVERSATION STYLE - CRITICAL:
-🗣️ MAXIMUM 40-50 WORDS ONLY - Like WhatsApp message
-✅ Simple words - like talking to parent/grandparent
-✅ ONE action point only
+YOU MUST respond in Kanglish - NOT pure English.
+
+MANDATORY KANGLISH WORDS:
+- nimmadu/nimage (your)
+- ide (is)
+- maadi (do)
+- kuDi (drink)
+- thinni (eat)
+- chennagide (good)
+
+KEEP MEDICAL TERMS IN ENGLISH.`;
+
+      responseExample = `
+EXAMPLE - User: "Nanna sugar 180"
+YOU RESPOND: "Nimmadu 180, slightly high ide. Walk maadi, water kuDi."`;
+      
+    } else {
+      languageInstruction = `RESPOND IN SIMPLE ENGLISH`;
+      responseExample = `EXAMPLE: "Your sugar is 180, bit high. Walk 10 mins, drink water."`;
+    }
+    
+    const system = `${languageInstruction}
+
+${responseExample}
+
+You are Gluco Sahayak - helping elderly/rural diabetes patients.
+
+RESPONSE RULES:
+✅ Maximum 40-50 words
+✅ 2-3 simple sentences
+✅ ONE action point
 ✅ Warm, friendly tone
 ❌ NO medical jargon
-❌ NO long sentences
-❌ NO lists
+❌ NO long explanations
 
-MEMORY RULES:
-• Remember conversation history
-• Don't repeat old advice
-• Focus on TODAY, not old readings
+${patient.language_pref !== 'en' ? '⚠️ REMEMBER: Use MIXED language as shown in example above!' : ''}
 
-RESPONSE FORMAT:
-1. Name + reading comment (if given)
-2. ONE simple action
-3. That's it!
-
-GOOD EXAMPLES:
-
-English: "Ramesh, 95 is perfect! Keep taking your medicine. Check again tomorrow morning."
-
-Hinglish: "Sunita ji, 220 bohot high hai. Doctor ko abhi phone karo. Paani piyo aur walk karo."
-
-${patient.language_pref === 'en' ? '' : 'REMEMBER: Use MIXED language (English + ' + (patient.language_pref === 'hi' ? 'Hindi' : 'Kannada') + ') - this is how people actually talk!'}
+MEMORY: Remember conversation history. Don't repeat old advice.
 
 MEDICAL CONTEXT:
 ${references}
 
 ${patientProfile}
 
-Keep it SHORT and NATURAL - like a helpful neighbor, not a doctor!`;
+Keep responses SHORT and in the CORRECT LANGUAGE!`;
     
     // ========================================
     // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
@@ -1719,17 +1861,16 @@ app.post('/webhook', async (req, res) => {
     } else if (messageType === 'audio') {
       isVoiceMessage = true;
       
-      const patient = await Patient.findOne({ phone: from });
-      const langCode = patient?.language_pref || 'en';
-      
       try {
-        text = await transcribeWhatsAppAudio(msg.audio.id, langCode);
+        // ✅ Let Whisper auto-detect language (don't pass preference)
+        text = await transcribeWhatsAppAudio(msg.audio.id);
         
         if (!text) {
           await sendWhatsAppMessage(from, "Couldn't hear clearly. Try text. 😊");
           return;
         }
         
+        const patient = await Patient.findOne({ phone: from });
         if (patient) {
           await Patient.findOneAndUpdate(
             { phone: from },
@@ -1754,6 +1895,67 @@ app.post('/webhook', async (req, res) => {
       
     } else {
       console.log(`⚠️  Unsupported type: ${messageType}`);
+      return;
+    }
+    
+    // ========================================
+    // 🔄 RESET COMMAND (User Self-Reset)
+    // ========================================
+    const lowerText = text.toLowerCase().trim();
+    
+    if (lowerText === 'reset') {
+      console.log(`🔄 RESET command from ${from}`);
+      
+      try {
+        // Delete all user data
+        await Patient.findOneAndDelete({ phone: from });
+        await OnboardingState.findOneAndDelete({ phone: from });
+        await GlucoseReading.deleteMany({ patientPhone: from });
+        await Conversation.deleteMany({ patientPhone: from });
+        await Triage.deleteMany({ patientPhone: from });
+        
+        console.log(`✅ User reset complete: ${from}`);
+        
+        // Send confirmation and start fresh
+        await sendWhatsAppMessage(from, 
+          `✅ Account reset complete!\n\n` +
+          `All your data has been deleted.\n\n` +
+          `Let's start fresh! 🎉\n\n` +
+          MESSAGES.welcome.en
+        );
+        
+        return; // Exit here, onboarding will start with next message
+      } catch (error) {
+        console.error(`❌ Reset error for ${from}:`, error.message);
+        await sendWhatsAppMessage(from, 
+          `Sorry, reset failed. Please try again or contact support.`
+        );
+        return;
+      }
+    }
+    
+    // ========================================
+    // 🆕 START COMMAND (Restart Onboarding)
+    // ========================================
+    if (lowerText === 'start' || lowerText === 'begin') {
+      console.log(`🆕 START command from ${from}`);
+      
+      // Check if user already exists
+      const existingPatient = await Patient.findOne({ phone: from });
+      
+      if (existingPatient && existingPatient.onboarding_completed) {
+        // User already registered
+        await sendWhatsAppMessage(from,
+          `👋 Welcome back ${existingPatient.full_name}!\n\n` +
+          `You're already registered.\n\n` +
+          `Send your glucose reading or ask me anything! 😊\n\n` +
+          `💡 Type "RESET" to delete all data and start fresh.`
+        );
+      } else {
+        // New user or incomplete onboarding - show welcome
+        await sendWhatsAppMessage(from, MESSAGES.welcome.en);
+      }
+      
       return;
     }
     
@@ -1791,9 +1993,13 @@ app.post('/webhook', async (req, res) => {
     const detectedLang = detectLanguage(text);
     const currentLang = patient.language_pref || 'en';
     
+    console.log(`📝 Message: "${text.substring(0, 50)}..."`);
+    console.log(`🌐 Current lang: ${currentLang}, Detected: ${detectedLang}`);
+    
     if (detectedLang !== currentLang) {
       await updateLanguagePreference(from, detectedLang, currentLang);
       patient.language_pref = detectedLang; // Update for current response
+      console.log(`✅ Language switched to ${detectedLang}`);
     }
     
     const reply = await analyzeWithClaudeRAG(from, text, patient);
@@ -1935,17 +2141,19 @@ app.get('/admin/conversation/:phone', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.3.0-NATURAL',
+    version: '7.4.0-LANGUAGE-FIX',
     onboarding: 'Simple & Fast (NO AI)',
-    medical: 'Claude + RAG + Auto Language Detection',
-    voice: OPENAI_API_KEY ? 'enabled' : 'disabled',
+    medical: 'Claude + RAG + FORCED Language',
+    voice: 'OpenAI TTS (High Quality)',
     features: {
       onboarding: '✅ Reliable',
       medical_ai: '✅ Claude + RAG - SHORT responses',
       conversation_memory: '✅ Remembers context',
-      voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled (add OpenAI credits)',
+      voice_input: voiceEnabled ? '✅ Whisper STT' : '❌ Disabled',
+      voice_output: voiceEnabled ? '✅ OpenAI TTS (clear)' : '❌ Disabled',
       multilang: '✅ EN/HI/KN + Auto-detect',
       language_switching: '✅ Auto-updates based on user language',
+      language_forcing: '✅ FORCED Hinglish/Kanglish responses',
       response_style: '✅ Short & conversational (40-50 words)',
       triage: '✅ Automatic'
     }
@@ -1991,24 +2199,26 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.3 - NATURAL! 🗣️     ║
+║  GLUCO SAHAYAK v7.5 - USER RESET! 🔄  ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
-║  🎙️  Voice: ${OPENAI_API_KEY ? '✅' : '❌'}                      ║
+║  🎙️  Voice: OpenAI TTS (High Quality) ║
 ║  🌐 Auto Language: ✅                 ║
+║  🔄 User Commands: RESET, START       ║
 ╠════════════════════════════════════════╣
 ║  NEW IN THIS VERSION:                 ║
-║    ✅ SHORT responses (40-50 words)   ║
-║    ✅ Auto language detection         ║
-║    ✅ Hinglish/Kanglish support       ║
-║    ✅ Conversational tone             ║
-║    ✅ Perfect for elderly/rural users ║
+║    ✅ Type "RESET" to restart         ║
+║    ✅ Type "START" to begin           ║
+║    ✅ Users can self-reset anytime    ║
+║    ✅ Clean slate for testing         ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
 📝 Process PDFs: POST /admin/process-pdfs
 🔧 Reset user: POST /admin/reset-user
 📊 Status: GET /admin/health
+
+💡 Users can now type "RESET" to delete their data and start fresh!
 `));
