@@ -1,4 +1,4 @@
-
+{
   "name": "gluco-sahayak-bot",
   "version": "5.0.0",
   "description": "WhatsApp diabetes bot",
@@ -18,3 +18,4 @@
   "engines": {
     "node": ">=18.0.0"
   }
+}
