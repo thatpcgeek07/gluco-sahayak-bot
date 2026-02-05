@@ -969,18 +969,34 @@ const THRESHOLDS = {
 
 async function sendWhatsAppMessage(to, message) {
   try {
+    // Truncate if too long (WhatsApp limit: 4096 chars)
+    if (message.length > 4096) {
+      console.warn(`⚠️  Message too long (${message.length} chars), truncating...`);
+      message = message.substring(0, 4090) + '...';
+    }
+    
+    console.log(`📤 Attempting to send to: ${to}`);
+    console.log(`📝 Message length: ${message.length} chars`);
+    
     await axios.post(`https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`, {
       messaging_product: 'whatsapp',
       to,
       type: 'text',
       text: { body: message }
     }, { 
-      headers: { 'Authorization': `Bearer ${WHATSAPP_TOKEN}` },
+      headers: { 
+        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
       timeout: 10000
     });
     console.log(`✅ Message sent to ${to}`);
   } catch (e) {
     console.error('❌ Send failed:', e.message);
+    console.error('❌ Response status:', e.response?.status);
+    console.error('❌ Response data:', JSON.stringify(e.response?.data, null, 2));
+    console.error('❌ Phone ID:', WHATSAPP_PHONE_ID ? 'SET' : 'NOT SET');
+    console.error('❌ Token:', WHATSAPP_TOKEN ? 'SET (length: ' + WHATSAPP_TOKEN.length + ')' : 'NOT SET');
   }
 }
 
