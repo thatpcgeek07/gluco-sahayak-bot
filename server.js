@@ -160,7 +160,7 @@ async function initializeRAGSystem() {
       ragSystemInitialized = true;
       return;
     }
-
+    
     console.log('📚 RAG not initialized');
     console.log('📝 Call: POST /admin/process-pdfs');
     ragSystemInitialized = false;
@@ -209,7 +209,7 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
     console.log(`👂 Transcribing with Whisper (${language})...`);
     
     if (!OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY not set');
+      throw new Error('OPENAI_API_KEY not set - voice features disabled');
     }
     
     const audioFilePath = await downloadWhatsAppAudio(mediaId);
@@ -242,11 +242,16 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
   } catch (error) {
     console.error('❌ Transcription error:', error.message);
     
+    // ✅ IMPROVED ERROR MESSAGES
     if (error.response?.status === 401) {
       throw new Error('Invalid OpenAI API key');
+    } else if (error.response?.status === 429) {
+      throw new Error('⚠️ OpenAI rate limit reached. Please add credits at platform.openai.com/account/billing');
+    } else if (error.response?.status === 402 || error.message.includes('insufficient_quota')) {
+      throw new Error('⚠️ OpenAI account has insufficient credits. Add credits at platform.openai.com/account/billing');
     }
     
-    throw new Error('Transcription failed');
+    throw new Error('Transcription failed: ' + error.message);
   }
 }
 
@@ -779,7 +784,7 @@ function parseHbA1c(message) {
 }
 
 // ========================================
-// RELIABLE ONBOARDING HANDLER
+// ✅ RELIABLE ONBOARDING HANDLER (FIXED!)
 // ========================================
 
 async function handleOnboarding(phone, message) {
@@ -797,101 +802,6 @@ async function handleOnboarding(phone, message) {
         data: new Map()
       });
       
-      return { response: MESSAGES.welcome.en, completed: false };
-    }
-
-    const lang = state.data.get('language_pref') || 'en';
-    let response = '';
-    let nextStep = state.currentStep;
-
-    // STEP-BY-STEP PROCESSING
-    switch (state.currentStep) {
-      case 'language': {
-        const parsedLang = parseLanguage(message);
-        if (parsedLang) {
-          state.data.set('language_pref', parsedLang);
-          nextStep = 'name';
-          response = MESSAGES.ask_name[parsedLang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.welcome[lang];
-        }
-        break;
-      }
-
-      case 'name': {
-        const parsedName = parseName(message);
-        if (parsedName) {
-          state.data.set('full_name', parsedName);
-          nextStep = 'age';
-          response = MESSAGES.ask_age[lang].replace('{name}', parsedName);
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_name[lang];
-        }
-        break;
-      }
-
-      case 'age': {
-        const parsedAge = parseAge(message);
-        if (parsedAge) {
-          state.data.set('age', parsedAge);
-          nextStep = 'gender';
-          response = MESSAGES.ask_gender[lang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_age[lang].replace('{name}', state.data.get('full_name') || '');
-        }
-        break;
-      }
-
-      case 'gender': {
-        const parsedGender = parseGender(message);
-        if (parsedGender) {
-          state.data.set('gender', parsedGender);
-          nextStep = 'emergency_contact';
-          response = MESSAGES.ask_emergency[lang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_gender[lang];
-        }
-        break;
-      }
-
-      case 'emergency_contact': {
-        const parsedPhone = parsePhone(message);
-        if (parsedPhone) {
-          state.data.set('emergency_contact', parsedPhone);
-          nextStep = 'pincode';
-          response = MESSAGES.ask_pincode[lang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_emergency[lang];
-        }
-        break;
-      }
-
-      case 'pincode': {
-        const parsedPincode = parsePincode(message);
-        if (parsedPincode) {
-          state.data.set('pincode', parsedPincode);
-          nextStep = 'consent';
-          response = MESSAGES.ask_consent[lang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_pincode[lang];
-        }
-        break;
-      }
-async function handleOnboarding(phone, message) {
-  try {
-    console.log(`🔧 Onboarding: ${phone} → "${message}"`);
-        
-    let state = await OnboardingState.findOne({ phone });
-        
-    // New user
-    if (!state) {
-      console.log(`🆕 New user: ${phone}`);
-      state = await OnboardingState.create({
-        phone,
-        currentStep: 'language',
-        data: new Map()
-      });
-            
       return { response: MESSAGES.welcome.en, completed: false };
     }
 
@@ -1013,7 +923,7 @@ async function handleOnboarding(phone, message) {
         const parsedMedType = parseMedicationType(message);
         if (parsedMedType) {
           state.data.set('medication_type', parsedMedType);
-                    
+          
           // Skip medicine names if "None"
           if (parsedMedType === 'None') {
             state.data.set('current_meds', ['None']);
@@ -1060,10 +970,10 @@ async function handleOnboarding(phone, message) {
       case 'hba1c': {
         const parsedHba1c = parseHbA1c(message);
         state.data.set('last_hba1c', parsedHba1c);
-                
+        
         // SAVE TO DATABASE
         await savePatientData(phone, state.data);
-                
+        
         nextStep = 'completed';
         response = MESSAGES.complete[lang].replace('{name}', state.data.get('full_name') || 'friend');
         break;
@@ -1075,8 +985,7 @@ async function handleOnboarding(phone, message) {
         response = "Something went wrong. Type 'start' to begin again.";
     }
 
-    // ✅ ✅ ✅ THIS IS THE CRITICAL FIX ✅ ✅ ✅
-    // Don't try to save state if onboarding is completed
+    // ✅✅✅ CRITICAL FIX: Don't save state if onboarding completed ✅✅✅
     // (savePatientData already deleted the OnboardingState document)
     if (nextStep === 'completed') {
       console.log(`✅ Onboarding completed for ${phone}`);
@@ -1087,89 +996,18 @@ async function handleOnboarding(phone, message) {
     state.currentStep = nextStep;
     state.lastUpdated = new Date();
     await state.save();
-        
+    
     console.log(`✅ Step: ${state.currentStep} → Response: ${response.length} chars`);
-        
-    return { response, completed: nextStep === 'completed' };
+    
+    return { response, completed: false };
   
   } catch (error) {
     console.error('❌ Onboarding error:', error.message);
     console.error(error.stack);
-        
+    
     return {
       response: "Sorry, an error occurred. Please type 'start' to begin again.",
       completed: false
-    };
-  }
-}
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_medication[lang];
-        }
-        break;
-      }
-
-      case 'medicine_names': {
-        const parsedMeds = parseMedicineNames(message);
-        state.data.set('current_meds', parsedMeds);
-        nextStep = 'diet';
-        response = MESSAGES.ask_diet[lang];
-        break;
-      }
-
-      case 'diet': {
-        const parsedDiet = parseDiet(message);
-        if (parsedDiet) {
-          state.data.set('diet_preference', parsedDiet);
-          nextStep = 'comorbidities';
-          response = MESSAGES.ask_comorbidities[lang];
-        } else {
-          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_diet[lang];
-        }
-        break;
-      }
-
-      case 'comorbidities': {
-        const parsedComorb = parseComorbidities(message);
-        state.data.set('comorbidities', parsedComorb);
-        nextStep = 'hba1c';
-        response = MESSAGES.ask_hba1c[lang];
-        break;
-      }
-
-      case 'hba1c': {
-        const parsedHba1c = parseHbA1c(message);
-        state.data.set('last_hba1c', parsedHba1c);
-        
-        // SAVE TO DATABASE
-        await savePatientData(phone, state.data);
-        
-        nextStep = 'completed';
-        response = MESSAGES.complete[lang].replace('{name}', state.data.get('full_name') || 'friend');
-        break;
-      }
-
-      default:
-        console.error(`❌ Unknown step: ${state.currentStep}`);
-        nextStep = 'language';
-        response = "Something went wrong. Type 'start' to begin again.";
-    }
-
-    // Save state
-    state.currentStep = nextStep;
-    state.lastUpdated = new Date();
-    await state.save();
-    
-    console.log(`✅ Step: ${state.currentStep} → Response: ${response.length} chars`);
-    
-    return { response, completed: nextStep === 'completed' };
-
-  } catch (error) {
-    console.error('❌ Onboarding error:', error.message);
-    console.error(error.stack);
-    
-    return { 
-      response: "Sorry, an error occurred. Please type 'start' to begin again.",
-      completed: false 
     };
   }
 }
@@ -1195,15 +1033,15 @@ async function savePatientData(phone, dataMap) {
       onboarding_completed: true,
       onboarding_step: 'completed'
     };
-
+    
     await Patient.findOneAndUpdate(
       { phone },
       patientData,
       { upsert: true, new: true }
     );
-
+    
     await OnboardingState.findOneAndDelete({ phone });
-
+    
     console.log(`✅ Patient saved: ${patientData.full_name}`);
   } catch (error) {
     console.error('❌ Save error:', error.message);
@@ -1233,12 +1071,12 @@ function extractKeywords(text) {
     'retinopathy', 'neuropathy', 'nephropathy', 'cardiovascular',
     'diet', 'exercise', 'medication', 'management', 'monitoring'
   ];
-
+  
   const lower = text.toLowerCase();
   terms.forEach(term => {
     if (lower.includes(term)) keywords.push(term);
   });
-
+  
   return [...new Set(keywords)];
 }
 
@@ -1254,7 +1092,7 @@ async function downloadFromGoogleDrive(fileId, filename) {
       responseType: 'arraybuffer',
       timeout: 120000
     });
-
+    
     const filePath = path.join('/tmp', filename);
     fs.writeFileSync(filePath, response.data);
     
@@ -1294,9 +1132,9 @@ async function processPDFFile(filePath, source) {
       .split(/\n\s*\n/)
       .map(p => p.trim())
       .filter(p => p.length > 200 && p.length < 2000);
-
+    
     let saved = 0;
-
+    
     for (let i = 0; i < paragraphs.length; i++) {
       const chunk = paragraphs[i];
       const keywords = extractKeywords(chunk);
@@ -1311,12 +1149,12 @@ async function processPDFFile(filePath, source) {
         });
         saved++;
       }
-
+      
       if ((i + 1) % 50 === 0) {
         console.log(`   Progress: ${i + 1}/${paragraphs.length}`);
       }
     }
-
+    
     console.log(`✅ ${source}: ${saved} chunks`);
     
     try { fs.unlinkSync(filePath); } catch (e) {}
@@ -1334,20 +1172,20 @@ app.post('/admin/process-pdfs', async (req, res) => {
     message: 'Processing medical textbooks',
     files: MEDICAL_PDF_FILES.length
   });
-
+  
   processAllPDFs();
 });
 
 async function processAllPDFs() {
   console.log('\n🏥 PROCESSING MEDICAL TEXTBOOKS\n');
-
+  
   let totalChunks = 0;
-
+  
   for (let i = 0; i < MEDICAL_PDF_FILES.length; i++) {
     const file = MEDICAL_PDF_FILES[i];
     
     console.log(`\n[${i + 1}/${MEDICAL_PDF_FILES.length}] ${file.source}`);
-
+    
     const filePath = await downloadFromGoogleDrive(file.fileId, file.filename);
     
     if (filePath) {
@@ -1355,9 +1193,9 @@ async function processAllPDFs() {
       totalChunks += chunks;
     }
   }
-
+  
   ragSystemInitialized = totalChunks > 0;
-
+  
   console.log(`\n✅ COMPLETE! ${totalChunks} total chunks\n`);
 }
 
@@ -1366,7 +1204,7 @@ app.get('/admin/rag-status', async (req, res) => {
   const bySource = await MedicalKnowledge.aggregate([
     { $group: { _id: '$source', count: { $sum: 1 } } }
   ]);
-
+  
   res.json({
     initialized: ragSystemInitialized,
     totalChunks,
@@ -1384,14 +1222,14 @@ async function retrieveMedicalKnowledge(query, topK = 5) {
       )
       .sort({ score: { $meta: 'textScore' } })
       .limit(topK);
-
+    
     if (results.length === 0) {
       const keywords = extractKeywords(query);
       if (keywords.length > 0) {
         return await MedicalKnowledge.find({ keywords: { $in: keywords } }).limit(topK);
       }
     }
-
+    
     return results;
   } catch (error) {
     return [];
@@ -1424,7 +1262,7 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
     medicalReferences: medicalRefs,
     physicianAlerted: urgency === 'EMERGENCY' || urgency === 'URGENT'
   });
-
+  
   console.log(`🏥 Triage: ${urgency}`);
   return urgency;
 }
@@ -1435,7 +1273,7 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
 
 async function initializeClaude() {
   if (!ANTHROPIC_API_KEY) return false;
-
+  
   try {
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
@@ -1449,7 +1287,7 @@ async function initializeClaude() {
       },
       timeout: 10000
     });
-
+    
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
       console.log('✅ Claude Sonnet 4 ready');
@@ -1531,7 +1369,7 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
     console.log('⚠️  Using fallback (Claude unavailable)');
     return fallbackResponse(msg);
   }
-
+  
   try {
     // ========================================
     // 🧠 RETRIEVE CONVERSATION HISTORY
@@ -1607,11 +1445,11 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
     }
     
     console.log(`📊 Glucose summary:\n${glucoseSummary}`);
-
+    
     const references = medicalContext.length > 0
       ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 600)}`).join('\n\n')
       : 'No specific textbook reference found. Use general diabetes management protocols.';
-
+    
     const patientProfile = `
 PATIENT PROFILE:
 - Name: ${patient.full_name} (${patient.age} years, ${patient.gender})
@@ -1625,7 +1463,7 @@ PATIENT PROFILE:
 GLUCOSE READINGS (TIME-AWARE):
 ${glucoseSummary}
 `;
-
+    
     const system = `You are Gluco Sahayak, medical diabetes assistant.
 
 CRITICAL RULES FOR CONVERSATION MEMORY:
@@ -1667,7 +1505,7 @@ ${patientProfile}
 REMEMBER: You have access to the full conversation history. Use it to provide contextual, personalized advice that builds on what you already know about the patient.
 
 START DIRECTLY with patient's name and medical advice. NO greetings.`;
-
+    
     // ========================================
     // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
     // ========================================
@@ -1688,7 +1526,7 @@ START DIRECTLY with patient's name and medical advice. NO greetings.`;
     });
     
     console.log(`📤 Sending ${conversationHistory.length} messages to Claude`);
-
+    
     // ========================================
     // 🤖 CALL CLAUDE WITH FULL CONTEXT
     // ========================================
@@ -1705,7 +1543,7 @@ START DIRECTLY with patient's name and medical advice. NO greetings.`;
       },
       timeout: 20000
     });
-
+    
     const text = response.data?.content?.[0]?.text;
     
     if (text) {
@@ -1763,16 +1601,16 @@ function extractGlucose(msg) {
   const match = msg.match(/(\d{2,3})/);
   const reading = match ? parseInt(match[1]) : null;
   if (!reading || reading < 40 || reading > 500) return { hasReading: false };
-
+  
   const lower = msg.toLowerCase();
   const type = lower.match(/fasting|empty|morning/) ? 'fasting' :
                lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
-
+  
   const symptoms = [];
   ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
     if (lower.includes(s)) symptoms.push(s);
   });
-
+  
   return { hasReading: true, reading, readingType: type, symptoms, notes: msg.substring(0, 200) };
 }
 
@@ -1780,7 +1618,7 @@ async function checkCritical(reading, type, phone) {
   const t = THRESHOLDS[type] || THRESHOLDS.random;
   let critical = false;
   let urgency = 'MONITORING';
-
+  
   if (reading < 54 || reading > 400) {
     critical = true;
     urgency = 'EMERGENCY';
@@ -1788,12 +1626,12 @@ async function checkCritical(reading, type, phone) {
     critical = true;
     urgency = 'URGENT';
   }
-
+  
   if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
     await sendWhatsAppMessage(PHYSICIAN_PHONE, 
       `🚨 ${urgency}\nPatient: ${phone}\nGlucose: ${reading} mg/dL`);
   }
-
+  
   return { critical, urgency };
 }
 
@@ -1810,18 +1648,18 @@ app.get('/webhook', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
-
+  
   try {
     const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
-
+    
     const from = msg.from;
     const messageType = msg.type;
     let text = '';
     let isVoiceMessage = false;
-
+    
     console.log(`\n📨 Message from: ${from} (${messageType})`);
-
+    
     if (messageType === 'text') {
       text = msg.text.body;
       
@@ -1848,7 +1686,16 @@ app.post('/webhook', async (req, res) => {
         
       } catch (error) {
         console.error('❌ Transcription failed:', error.message);
-        await sendWhatsAppMessage(from, "Voice error. Please send text. 😊");
+        
+        // ✅ IMPROVED: Better error messages for credit issues
+        if (error.message.includes('credits') || error.message.includes('insufficient_quota')) {
+          await sendWhatsAppMessage(from, 
+            "🎙️ Voice feature temporarily unavailable.\n\n" +
+            "💡 Tip: Add OpenAI credits to enable voice!\n\n" +
+            "Please send text for now. 😊");
+        } else {
+          await sendWhatsAppMessage(from, "Voice error. Please send text. 😊");
+        }
         return;
       }
       
@@ -1856,10 +1703,10 @@ app.post('/webhook', async (req, res) => {
       console.log(`⚠️  Unsupported type: ${messageType}`);
       return;
     }
-
+    
     // CHECK ONBOARDING
     const onboardingStatus = await checkOnboardingStatus(from);
-
+    
     if (onboardingStatus.needsOnboarding) {
       if (isVoiceMessage) {
         await sendWhatsAppMessage(from, 
@@ -1881,17 +1728,17 @@ app.post('/webhook', async (req, res) => {
       }
       return;
     }
-
+    
     // PROCESS WITH CLAUDE + RAG
     const patient = onboardingStatus.patient;
     const reply = await analyzeWithClaudeRAG(from, text, patient);
-
+    
     if (!reply || reply.length === 0) {
       console.error('❌ Empty Claude response!');
       await sendWhatsAppMessage(from, fallbackResponse(text));
       return;
     }
-
+    
     // SEND RESPONSE
     if (isVoiceMessage && voiceEnabled) {
       const success = await sendVoiceResponse(from, reply, patient.language_pref || 'en');
@@ -1901,7 +1748,7 @@ app.post('/webhook', async (req, res) => {
     } else {
       await sendWhatsAppMessage(from, reply);
     }
-
+    
     // PROCESS GLUCOSE
     const data = extractGlucose(text);
     if (data.hasReading) {
@@ -2023,15 +1870,15 @@ app.get('/admin/conversation/:phone', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.1.0-MEMORY',
-    onboarding: 'Simple & Fast (NO AI)',
+    version: '7.2.0-FIXED',
+    onboarding: 'Simple & Fast (NO AI) - ✅ CRASH FIXED',
     medical: 'Claude + RAG + Conversation Memory',
     voice: OPENAI_API_KEY ? 'enabled' : 'disabled',
     features: {
-      onboarding: '✅ Reliable (no AI dependency)',
+      onboarding: '✅ Reliable (no AI dependency) - FIXED!',
       medical_ai: '✅ Claude + RAG',
       conversation_memory: '✅ Remembers context',
-      voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled',
+      voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled (add OpenAI credits)',
       multilang: '✅ EN/HI/KN',
       triage: '✅ Automatic'
     }
@@ -2049,7 +1896,7 @@ cron.schedule('0 8 * * *', async () => {
   });
   
   for (const p of patients) {
-    const greeting = p.language_pref === 'hi' ? '🌅 Good morning' : 
+    const greeting = p.language_pref === 'hi' ? '🌅 Good morning' :
                      p.language_pref === 'kn' ? '🌅 Good morning' : '🌅 Good morning';
     await sendWhatsAppMessage(p.phone, `${greeting} ${p.full_name}! Time for meds & glucose check 😊`);
   }
@@ -2077,20 +1924,17 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.0 - RELIABLE        ║
+║  GLUCO SAHAYAK v7.2 - FIXED! ✅       ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
 ║  🎙️  Voice: ${OPENAI_API_KEY ? '✅' : '❌'}                      ║
 ╠════════════════════════════════════════╣
-║  IMPROVEMENTS:                        ║
-║    ✅ Zero AI dependency onboarding   ║
-║    ✅ Fast, reliable responses        ║
-║    ✅ One question at a time          ║
-║    ✅ Flexible input parsing          ║
-║    ✅ Can't fail                      ║
-║    💡 AI only for medical queries     ║
+║  FIXES IN THIS VERSION:               ║
+║    ✅ Onboarding crash FIXED!         ║
+║    ✅ Better voice error messages     ║
+║    ✅ All original features intact    ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
