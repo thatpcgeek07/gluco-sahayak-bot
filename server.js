@@ -160,7 +160,7 @@ async function initializeRAGSystem() {
       ragSystemInitialized = true;
       return;
     }
-    
+
     console.log('📚 RAG not initialized');
     console.log('📝 Call: POST /admin/process-pdfs');
     ragSystemInitialized = false;
@@ -206,10 +206,10 @@ async function downloadWhatsAppAudio(mediaId) {
 
 async function transcribeWhatsAppAudio(mediaId, language = 'en') {
   try {
-    console.log(`👂 Transcribing with Whisper (auto-detect)...`);
+    console.log(`👂 Transcribing with Whisper (${language})...`);
     
     if (!OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY not set - voice features disabled');
+      throw new Error('OPENAI_API_KEY not set');
     }
     
     const audioFilePath = await downloadWhatsAppAudio(mediaId);
@@ -218,9 +218,8 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
     form.append('file', fs.createReadStream(audioFilePath));
     form.append('model', 'whisper-1');
     
-    // ✅ DON'T specify language - let Whisper auto-detect!
-    // This allows users to speak any language regardless of their registered preference
-    // form.append('language', ...) // REMOVED!
+    const languageMap = { 'en': 'en', 'hi': 'hi', 'kn': 'kn' };
+    form.append('language', languageMap[language] || 'en');
     
     const response = await axios.post(
       'https://api.openai.com/v1/audio/transcriptions',
@@ -243,154 +242,18 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
   } catch (error) {
     console.error('❌ Transcription error:', error.message);
     
-    // ✅ IMPROVED ERROR MESSAGES
     if (error.response?.status === 401) {
       throw new Error('Invalid OpenAI API key');
-    } else if (error.response?.status === 429) {
-      throw new Error('⚠️ OpenAI rate limit reached. Please add credits at platform.openai.com/account/billing');
-    } else if (error.response?.status === 402 || error.message.includes('insufficient_quota')) {
-      throw new Error('⚠️ OpenAI account has insufficient credits. Add credits at platform.openai.com/account/billing');
     }
     
-    throw new Error('Transcription failed: ' + error.message);
+    throw new Error('Transcription failed');
   }
 }
 
 async function speakResponse(text, language = 'en') {
-  try {
-    console.log(`🗣️  Generating speech with Google Cloud TTS (${language})...`);
-    
-    // Google Cloud TTS has MUCH better Indian voices than OpenAI
-    // Wavenet voices sound very natural and human-like
-    
-    const voiceMap = {
-      'en': { languageCode: 'en-IN', name: 'en-IN-Wavenet-D', gender: 'MALE' },      // Indian English - Natural male
-      'hi': { languageCode: 'hi-IN', name: 'hi-IN-Wavenet-D', gender: 'MALE' },      // Hindi - Natural male  
-      'kn': { languageCode: 'kn-IN', name: 'kn-IN-Wavenet-A', gender: 'FEMALE' }     // Kannada - Natural female
-    };
-    
-    const voice = voiceMap[language] || voiceMap['en'];
-    
-    // Build request for Google Cloud TTS
-    const request = {
-      input: { text: text },
-      voice: {
-        languageCode: voice.languageCode,
-        name: voice.name,
-        ssmlGender: voice.gender
-      },
-      audioConfig: {
-        audioEncoding: 'MP3',
-        speakingRate: 0.85,  // Slightly slower for elderly users
-        pitch: 0.0,          // Normal pitch
-        volumeGainDb: 0.0    // Normal volume
-      }
-    };
-    
-    // Use Google Cloud TTS API
-    const response = await axios.post(
-      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_CLOUD_API_KEY || OPENAI_API_KEY}`,
-      request,
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000
-      }
-    );
-    
-    // Decode base64 audio
-    const audioContent = response.data.audioContent;
-    const audioBuffer = Buffer.from(audioContent, 'base64');
-    
-    // Save audio file
-    const tempDir = '/tmp/whatsapp-tts';
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    
-    const timestamp = Date.now();
-    const fileName = `tts_google_${language}_${timestamp}.mp3`;
-    const filePath = path.join(tempDir, fileName);
-    
-    fs.writeFileSync(filePath, audioBuffer);
-    
-    console.log(`✅ Speech generated (Google Cloud TTS - ${voice.name})`);
-    return filePath;
-    
-  } catch (error) {
-    console.error('❌ Google TTS error:', error.message);
-    
-    // If Google Cloud not configured, try OpenAI TTS
-    if (error.response?.status === 403 || error.response?.status === 401) {
-      console.log('⚠️  Google Cloud TTS not configured, trying OpenAI TTS...');
-      return await speakResponseOpenAI(text, language);
-    }
-    
-    // Otherwise fallback to gTTS
-    console.log('⚠️  Falling back to gTTS...');
-    return await speakResponseGTTS(text, language);
-  }
-}
-
-// OpenAI TTS function (fallback)
-async function speakResponseOpenAI(text, language = 'en') {
-  try {
-    console.log(`🗣️  Generating speech with OpenAI TTS (${language})...`);
-    
-    if (!OPENAI_API_KEY) {
-      throw new Error('OpenAI API key required');
-    }
-    
-    const voiceMap = {
-      'en': 'alloy',
-      'hi': 'nova',
-      'kn': 'nova'
-    };
-    
-    const voice = voiceMap[language] || 'alloy';
-    
-    const response = await axios.post(
-      'https://api.openai.com/v1/audio/speech',
-      {
-        model: 'tts-1',
-        voice: voice,
-        input: text,
-        speed: 0.85
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        responseType: 'arraybuffer',
-        timeout: 30000
-      }
-    );
-    
-    const tempDir = '/tmp/whatsapp-tts';
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    
-    const timestamp = Date.now();
-    const fileName = `tts_openai_${language}_${timestamp}.mp3`;
-    const filePath = path.join(tempDir, fileName);
-    
-    fs.writeFileSync(filePath, response.data);
-    
-    console.log(`✅ Speech generated (OpenAI TTS)`);
-    return filePath;
-    
-  } catch (error) {
-    console.error('❌ OpenAI TTS error:', error.message);
-    throw error;
-  }
-}
-
-// Fallback gTTS function (if OpenAI TTS fails)
-async function speakResponseGTTS(text, language = 'en') {
   return new Promise((resolve, reject) => {
     try {
-      console.log(`🗣️  Generating speech with gTTS (${language})...`);
+      console.log(`🗣️  Generating speech (${language})...`);
       
       const langMap = { 'en': 'en', 'hi': 'hi', 'kn': 'kn' };
       const lang = langMap[language] || 'en';
@@ -403,21 +266,21 @@ async function speakResponseGTTS(text, language = 'en') {
       }
       
       const timestamp = Date.now();
-      const fileName = `tts_gtts_${language}_${timestamp}.mp3`;
+      const fileName = `tts_${language}_${timestamp}.mp3`;
       const filePath = path.join(tempDir, fileName);
       
       gttsInstance.save(filePath, (err) => {
         if (err) {
-          console.error('❌ gTTS error:', err);
+          console.error('❌ TTS error:', err);
           reject(new Error('Failed to generate speech'));
           return;
         }
         
-        console.log(`✅ Speech generated (gTTS)`);
+        console.log(`✅ Speech generated`);
         resolve(filePath);
       });
     } catch (error) {
-      console.error('❌ gTTS error:', error.message);
+      console.error('❌ TTS error:', error.message);
       reject(new Error('Failed to generate speech'));
     }
   });
@@ -628,13 +491,7 @@ I'll help you with:
 🚨 Emergency alerts
 🎙️ Voice messages (send audio!)
 
-Ready to start! What's your current glucose reading?
-
-💡 Quick commands:
-• "RESET" - Delete all data
-• "HINDI" - Switch to Hinglish
-• "KANNADA" - Switch to Kanglish
-• "ENGLISH" - Switch to English`,
+Ready to start! What's your current glucose reading?`,
     hi: `✅ हो गया {name} जी!
 
 Profile तैयार! 🎉
@@ -646,13 +503,7 @@ Profile तैयार! 🎉
 🚨 Emergency alert
 🎙️ Voice messages
 
-तैयार! Current glucose reading?
-
-💡 Commands:
-• "RESET" - सब delete
-• "HINDI" - Hinglish में
-• "KANNADA" - Kanglish में  
-• "ENGLISH" - English में`,
+तैयार! Current glucose reading?`,
     kn: `✅ ಮುಗಿಯಿತು {name}!
 
 Profile ready! 🎉
@@ -664,13 +515,7 @@ Profile ready! 🎉
 🚨 Emergency alert
 🎙️ Voice messages
 
-ತಯಾರು! Current glucose reading?
-
-💡 Commands:
-• "RESET" - ಎಲ್ಲಾ delete
-• "HINDI" - Hinglish
-• "KANNADA" - Kanglish
-• "ENGLISH" - English`
+ತಯಾರು! Current glucose reading?`
   },
   
   error_retry: {
@@ -934,92 +779,7 @@ function parseHbA1c(message) {
 }
 
 // ========================================
-// 🌐 LANGUAGE DETECTION (AUTO-UPDATE)
-// ========================================
-
-function detectLanguage(message) {
-  const text = message.toLowerCase();
-  
-  // Hindi indicators - including both Devanagari and romanized
-  const hindiWords = [
-    // Devanagari
-    'मेरा', 'है', 'में', 'का', 'को', 'से', 'के', 'की', 'हूं', 'हैं', 
-    'था', 'थी', 'गया', 'गई', 'हो', 'ही', 'तो', 'यह', 'वह', 'कर',
-    'था', 'हुआ', 'हुई', 'होना', 'करना', 'लेना', 'देना',
-    // Romanized/Hinglish
-    'mera', 'hai', 'mein', 'ka', 'ko', 'se', 'ke', 'ki', 'hoon', 'hain',
-    'kya', 'kaise', 'kab', 'kahan', 'kyun', 'aur', 'nahi', 'haan', 'ji',
-    'aapka', 'aapko', 'mere', 'tera', 'tumhara', 'uska', 'iske',
-    'bohot', 'bahut', 'thoda', 'zyada', 'kam', 'bilkul', 'abhi', 'turant',
-    'karo', 'karna', 'piyo', 'peena', 'khao', 'khana', 'bataiye', 'batao',
-    'theek', 'achha', 'accha', 'sahi', 'galat'
-  ];
-  const hindiChars = /[\u0900-\u097F]/; // Devanagari script
-  
-  // Kannada indicators
-  const kannadaWords = [
-    'ನನ್ನ', 'ನಾನು', 'ಇದೆ', 'ಆಗಿದೆ', 'ಮಾಡಿ', 'ಹೇಗೆ', 'ಏನು',
-    'ನಿಮ್ಮ', 'ನಿಮ್ಮದು', 'ಅವರ', 'ನಮ್ಮ', 'ತುಂಬಾ', 'ಸ್ವಲ್ಪ',
-    // Romanized/Kanglish
-    'nimmadu', 'nannu', 'naanu', 'ide', 'aagide', 'maadi', 'maadu',
-    'hege', 'enu', 'ella', 'chennaagide', 'tumba', 'swalpa',
-    'jaasthi', 'kammi', 'kuDi', 'kuDu', 'tini', 'tinnu'
-  ];
-  const kannadaChars = /[\u0C80-\u0CFF]/; // Kannada script
-  
-  // Check for scripts first (most reliable)
-  if (hindiChars.test(text)) {
-    console.log('🌐 Detected Hindi script');
-    return 'hi';
-  }
-  if (kannadaChars.test(text)) {
-    console.log('🌐 Detected Kannada script');
-    return 'kn';
-  }
-  
-  // Check for words (works for romanized text)
-  const hindiCount = hindiWords.filter(word => {
-    // Use word boundaries to avoid partial matches
-    const regex = new RegExp('\\b' + word + '\\b', 'i');
-    return regex.test(text);
-  }).length;
-  
-  const kannadaCount = kannadaWords.filter(word => {
-    const regex = new RegExp('\\b' + word + '\\b', 'i');
-    return regex.test(text);
-  }).length;
-  
-  console.log(`🌐 Language detection: Hindi=${hindiCount} words, Kannada=${kannadaCount} words`);
-  
-  // Need at least 2 matching words to switch language
-  if (hindiCount >= 2) {
-    console.log('🌐 Detected Hindi/Hinglish');
-    return 'hi';
-  }
-  if (kannadaCount >= 2) {
-    console.log('🌐 Detected Kannada/Kanglish');
-    return 'kn';
-  }
-  
-  // Default to English
-  return 'en';
-}
-
-async function updateLanguagePreference(phone, detectedLang, currentLang) {
-  // Only update if language changed
-  if (detectedLang !== currentLang) {
-    await Patient.findOneAndUpdate(
-      { phone },
-      { language_pref: detectedLang }
-    );
-    console.log(`🌐 Language updated: ${currentLang} → ${detectedLang} for ${phone}`);
-    return true;
-  }
-  return false;
-}
-
-// ========================================
-// ✅ RELIABLE ONBOARDING HANDLER (FIXED!)
+// RELIABLE ONBOARDING HANDLER
 // ========================================
 
 async function handleOnboarding(phone, message) {
@@ -1057,7 +817,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'name': {
         const parsedName = parseName(message);
         if (parsedName) {
@@ -1069,7 +829,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'age': {
         const parsedAge = parseAge(message);
         if (parsedAge) {
@@ -1081,7 +841,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'gender': {
         const parsedGender = parseGender(message);
         if (parsedGender) {
@@ -1093,7 +853,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'emergency_contact': {
         const parsedPhone = parsePhone(message);
         if (parsedPhone) {
@@ -1105,7 +865,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'pincode': {
         const parsedPincode = parsePincode(message);
         if (parsedPincode) {
@@ -1117,7 +877,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'consent': {
         const parsedConsent = parseConsent(message);
         if (parsedConsent !== null) {
@@ -1129,7 +889,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'diabetes_type': {
         const parsedType = parseDiabetesType(message);
         if (parsedType) {
@@ -1141,7 +901,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'duration': {
         const parsedDuration = parseDuration(message);
         if (parsedDuration !== null) {
@@ -1153,7 +913,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'medication_type': {
         const parsedMedType = parseMedicationType(message);
         if (parsedMedType) {
@@ -1173,7 +933,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'medicine_names': {
         const parsedMeds = parseMedicineNames(message);
         state.data.set('current_meds', parsedMeds);
@@ -1181,7 +941,7 @@ async function handleOnboarding(phone, message) {
         response = MESSAGES.ask_diet[lang];
         break;
       }
-      
+
       case 'diet': {
         const parsedDiet = parseDiet(message);
         if (parsedDiet) {
@@ -1193,7 +953,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-      
+
       case 'comorbidities': {
         const parsedComorb = parseComorbidities(message);
         state.data.set('comorbidities', parsedComorb);
@@ -1201,7 +961,7 @@ async function handleOnboarding(phone, message) {
         response = MESSAGES.ask_hba1c[lang];
         break;
       }
-      
+
       case 'hba1c': {
         const parsedHba1c = parseHbA1c(message);
         state.data.set('last_hba1c', parsedHba1c);
@@ -1213,36 +973,29 @@ async function handleOnboarding(phone, message) {
         response = MESSAGES.complete[lang].replace('{name}', state.data.get('full_name') || 'friend');
         break;
       }
-      
+
       default:
         console.error(`❌ Unknown step: ${state.currentStep}`);
         nextStep = 'language';
         response = "Something went wrong. Type 'start' to begin again.";
     }
 
-    // ✅✅✅ CRITICAL FIX: Don't save state if onboarding completed ✅✅✅
-    // (savePatientData already deleted the OnboardingState document)
-    if (nextStep === 'completed') {
-      console.log(`✅ Onboarding completed for ${phone}`);
-      return { response, completed: true };
-    }
-
-    // Save state (only for non-completed steps)
+    // Save state
     state.currentStep = nextStep;
     state.lastUpdated = new Date();
     await state.save();
     
     console.log(`✅ Step: ${state.currentStep} → Response: ${response.length} chars`);
     
-    return { response, completed: false };
-  
+    return { response, completed: nextStep === 'completed' };
+
   } catch (error) {
     console.error('❌ Onboarding error:', error.message);
     console.error(error.stack);
     
-    return {
+    return { 
       response: "Sorry, an error occurred. Please type 'start' to begin again.",
-      completed: false
+      completed: false 
     };
   }
 }
@@ -1268,15 +1021,15 @@ async function savePatientData(phone, dataMap) {
       onboarding_completed: true,
       onboarding_step: 'completed'
     };
-    
+
     await Patient.findOneAndUpdate(
       { phone },
       patientData,
       { upsert: true, new: true }
     );
-    
+
     await OnboardingState.findOneAndDelete({ phone });
-    
+
     console.log(`✅ Patient saved: ${patientData.full_name}`);
   } catch (error) {
     console.error('❌ Save error:', error.message);
@@ -1306,12 +1059,12 @@ function extractKeywords(text) {
     'retinopathy', 'neuropathy', 'nephropathy', 'cardiovascular',
     'diet', 'exercise', 'medication', 'management', 'monitoring'
   ];
-  
+
   const lower = text.toLowerCase();
   terms.forEach(term => {
     if (lower.includes(term)) keywords.push(term);
   });
-  
+
   return [...new Set(keywords)];
 }
 
@@ -1327,7 +1080,7 @@ async function downloadFromGoogleDrive(fileId, filename) {
       responseType: 'arraybuffer',
       timeout: 120000
     });
-    
+
     const filePath = path.join('/tmp', filename);
     fs.writeFileSync(filePath, response.data);
     
@@ -1367,9 +1120,9 @@ async function processPDFFile(filePath, source) {
       .split(/\n\s*\n/)
       .map(p => p.trim())
       .filter(p => p.length > 200 && p.length < 2000);
-    
+
     let saved = 0;
-    
+
     for (let i = 0; i < paragraphs.length; i++) {
       const chunk = paragraphs[i];
       const keywords = extractKeywords(chunk);
@@ -1384,12 +1137,12 @@ async function processPDFFile(filePath, source) {
         });
         saved++;
       }
-      
+
       if ((i + 1) % 50 === 0) {
         console.log(`   Progress: ${i + 1}/${paragraphs.length}`);
       }
     }
-    
+
     console.log(`✅ ${source}: ${saved} chunks`);
     
     try { fs.unlinkSync(filePath); } catch (e) {}
@@ -1407,20 +1160,20 @@ app.post('/admin/process-pdfs', async (req, res) => {
     message: 'Processing medical textbooks',
     files: MEDICAL_PDF_FILES.length
   });
-  
+
   processAllPDFs();
 });
 
 async function processAllPDFs() {
   console.log('\n🏥 PROCESSING MEDICAL TEXTBOOKS\n');
-  
+
   let totalChunks = 0;
-  
+
   for (let i = 0; i < MEDICAL_PDF_FILES.length; i++) {
     const file = MEDICAL_PDF_FILES[i];
     
     console.log(`\n[${i + 1}/${MEDICAL_PDF_FILES.length}] ${file.source}`);
-    
+
     const filePath = await downloadFromGoogleDrive(file.fileId, file.filename);
     
     if (filePath) {
@@ -1428,9 +1181,9 @@ async function processAllPDFs() {
       totalChunks += chunks;
     }
   }
-  
+
   ragSystemInitialized = totalChunks > 0;
-  
+
   console.log(`\n✅ COMPLETE! ${totalChunks} total chunks\n`);
 }
 
@@ -1439,7 +1192,7 @@ app.get('/admin/rag-status', async (req, res) => {
   const bySource = await MedicalKnowledge.aggregate([
     { $group: { _id: '$source', count: { $sum: 1 } } }
   ]);
-  
+
   res.json({
     initialized: ragSystemInitialized,
     totalChunks,
@@ -1457,14 +1210,14 @@ async function retrieveMedicalKnowledge(query, topK = 5) {
       )
       .sort({ score: { $meta: 'textScore' } })
       .limit(topK);
-    
+
     if (results.length === 0) {
       const keywords = extractKeywords(query);
       if (keywords.length > 0) {
         return await MedicalKnowledge.find({ keywords: { $in: keywords } }).limit(topK);
       }
     }
-    
+
     return results;
   } catch (error) {
     return [];
@@ -1497,7 +1250,7 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
     medicalReferences: medicalRefs,
     physicianAlerted: urgency === 'EMERGENCY' || urgency === 'URGENT'
   });
-  
+
   console.log(`🏥 Triage: ${urgency}`);
   return urgency;
 }
@@ -1508,7 +1261,7 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
 
 async function initializeClaude() {
   if (!ANTHROPIC_API_KEY) return false;
-  
+
   try {
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
@@ -1522,7 +1275,7 @@ async function initializeClaude() {
       },
       timeout: 10000
     });
-    
+
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
       console.log('✅ Claude Sonnet 4 ready');
@@ -1577,26 +1330,26 @@ function fallbackResponse(msg) {
   const num = msg.match(/(\d{2,3})/);
   const glucose = num ? parseInt(num[1]) : null;
   
-  if (lower === 'hi' || lower === 'hello' || lower === 'hey' || lower === 'नमस्ते' || lower === 'ನಮಸ್ಕಾರ') {
-    return `Namaste! 👋 Send your sugar reading or ask me anything.`;
+  if (lower === 'hi' || lower === 'hello' || lower === 'hey') {
+    return `Hello! 🏥 Gluco Sahayak\n\n📊 Send: "My sugar is 120"\n🍽️ Ask: "Diet advice"\n🎙️ Use voice messages`;
   }
   
   if (glucose && glucose >= 40 && glucose <= 500) {
-    let r = `${glucose} mg/dL - `;
+    let r = `Reading: ${glucose} mg/dL\n\n`;
     
-    if (glucose < 54) r += `🚨 Very LOW! Eat something sweet NOW!`;
-    else if (glucose < 70) r += `⚠️ Low. Eat 3 biscuits now.`;
-    else if (glucose <= 100) r += `✅ Perfect!`;
-    else if (glucose <= 140) r += `👍 Good!`;
-    else if (glucose <= 180) r += `⚠️ High. Walk 10 mins.`;
-    else if (glucose <= 250) r += `🚨 Very high! Walk & drink water.`;
-    else if (glucose <= 400) r += `🚨🚨 Call doctor NOW!`;
-    else r += `🚨🚨🚨 Go to hospital!`;
+    if (glucose < 54) r += `🚨🚨 EMERGENCY! Eat 15g carbs NOW!`;
+    else if (glucose < 70) r += `🚨 LOW! Eat 15g fast carbs.`;
+    else if (glucose <= 100) r += `✅ EXCELLENT! Normal 👏`;
+    else if (glucose <= 125) r += `⚠️ Slightly elevated. Watch diet.`;
+    else if (glucose <= 180) r += `⚠️ ELEVATED. Review diet.`;
+    else if (glucose <= 250) r += `🚨 HIGH! Water, walk, recheck.`;
+    else if (glucose <= 400) r += `🚨🚨 SEVERE! Contact doctor!`;
+    else r += `🚨🚨🚨 CRITICAL! Go to ER!`;
     
     return r;
   }
   
-  return `Send your sugar reading 📊 or ask questions about diet, medicine, etc.`;
+  return `I can help with:\n📊 Glucose tracking\n🍽️ Diet advice\n💊 Medication guidance\n🎙️ Voice messages`;
 }
 
 async function analyzeWithClaudeRAG(phone, msg, patient) {
@@ -1604,7 +1357,7 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
     console.log('⚠️  Using fallback (Claude unavailable)');
     return fallbackResponse(msg);
   }
-  
+
   try {
     // ========================================
     // 🧠 RETRIEVE CONVERSATION HISTORY
@@ -1680,11 +1433,11 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
     }
     
     console.log(`📊 Glucose summary:\n${glucoseSummary}`);
-    
+
     const references = medicalContext.length > 0
       ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 600)}`).join('\n\n')
       : 'No specific textbook reference found. Use general diabetes management protocols.';
-    
+
     const patientProfile = `
 PATIENT PROFILE:
 - Name: ${patient.full_name} (${patient.age} years, ${patient.gender})
@@ -1698,96 +1451,49 @@ PATIENT PROFILE:
 GLUCOSE READINGS (TIME-AWARE):
 ${glucoseSummary}
 `;
-    
-    // ========================================
-    // 🎯 LANGUAGE-SPECIFIC RESPONSE RULES
-    // ========================================
-    let languageInstruction = '';
-    let responseExample = '';
-    
-    if (patient.language_pref === 'hi') {
-      languageInstruction = `
-🚨🚨🚨 CRITICAL: RESPOND IN HINGLISH 🚨🚨🚨
 
-YOU MUST USE HINGLISH - THIS IS NON-NEGOTIABLE!
-DO NOT RESPOND IN PURE ENGLISH!
+    const system = `You are Gluco Sahayak, medical diabetes assistant.
 
-HINGLISH = Hindi + English mixed naturally
+CRITICAL RULES FOR CONVERSATION MEMORY:
+1. 🧠 REMEMBER EVERYTHING from conversation history - this is MANDATORY
+2. 🚫 NEVER repeat recommendations already given
+3. 🔄 BUILD ON previous discussion - reference what patient told you
+4. ✅ If patient mentions equipment (pump, CGM) - ACKNOWLEDGE IT in all future responses
+5. ✅ If patient provides updates (weight change, new symptoms) - UPDATE your advice
+6. 🕐 DISTINGUISH between TODAY vs YESTERDAY vs LAST WEEK readings
+7. ⚠️ Don't alarm about old readings - focus on current status
 
-MANDATORY WORDS YOU MUST USE:
-- aapka/tumhara (NOT "your")
-- hai (NOT "is")  
-- karo (NOT "do")
-- piyo (NOT "drink")
-- khao (NOT "eat")
-- theek (NOT "okay")
-- zyada (NOT "high/more")
-- kam (NOT "low/less")
+EXAMPLE - CORRECT BEHAVIOR:
+User: "I'm on insulin pump"
+Assistant: [acknowledges pump]
+User: "I gained weight"
+Assistant: "Given your insulin pump settings and weight gain..." ✅
 
-KEEP MEDICAL TERMS IN ENGLISH: sugar, medicine, doctor`;
+EXAMPLE - WRONG BEHAVIOR:
+User: "I'm on insulin pump"  
+Assistant: [acknowledges pump]
+User: "I gained weight"
+Assistant: "You need to start insulin therapy" ❌ WRONG - they already have pump!
 
-      responseExample = `
-CORRECT EXAMPLE:
-User: "Mera sugar 180 hai"
-YOU MUST SAY: "Aapka sugar 180 hai, thoda zyada. Walk karo aur paani piyo."
+MEDICAL GUIDANCE:
+8. ALWAYS use medical textbook excerpts below
+9. ALWAYS cite source [Reference Name]
+10. Address patient by name
+11. Consider FULL patient profile AND conversation history
+12. Personalize for meds/comorbidities/diet
+13. Indian context (roti, dal, walk)
+14. Max 150 words
+15. NEVER start with greetings - START DIRECTLY with medical advice
 
-WRONG - DO NOT DO THIS:
-"Your sugar is 180, slightly high..." ❌ THIS IS PURE ENGLISH!
-
-REMEMBER: USE HINGLISH, NOT ENGLISH!`;
-      
-    } else if (patient.language_pref === 'kn') {
-      languageInstruction = `
-🚨🚨🚨 CRITICAL: RESPOND IN KANGLISH 🚨🚨🚨
-
-YOU MUST USE KANGLISH - THIS IS NON-NEGOTIABLE!
-
-KANGLISH = Kannada + English mixed
-
-MANDATORY WORDS:
-- nimmadu (NOT "your")
-- ide (NOT "is")
-- maadi (NOT "do")
-- kuDi (NOT "drink")
-
-KEEP MEDICAL TERMS IN ENGLISH.`;
-
-      responseExample = `
-CORRECT: "Nimmadu 180, slightly high ide. Walk maadi, water kuDi."
-WRONG: "Your sugar is 180..." ❌`;
-      
-    } else {
-      languageInstruction = `RESPOND IN SIMPLE ENGLISH`;
-      responseExample = `EXAMPLE: "Your sugar is 180, bit high. Walk 10 mins, drink water."`;
-    }
-    
-    const system = `${languageInstruction}
-
-${responseExample}
-
-🎯 THIS MESSAGE'S LANGUAGE: ${patient.language_pref.toUpperCase()}
-${patient.language_pref !== 'en' ? '⚠️ DO NOT USE PURE ENGLISH - USE MIXED LANGUAGE!' : ''}
-
-You are Gluco Sahayak for elderly/rural patients.
-
-RESPONSE RULES:
-✅ Maximum 40-50 words
-✅ 2-3 simple sentences
-✅ ONE action point
-❌ NO pure English if language is Hindi/Kannada
-${patient.language_pref === 'hi' ? '❌ NO "your", "is", "do" - USE "aapka", "hai", "karo"!' : ''}
-
-MEMORY: Remember conversation. Don't repeat old advice.
-
-${patient.language_pref !== 'en' ? '\n🚨 FINAL REMINDER: MIXED LANGUAGE REQUIRED - NOT PURE ENGLISH! 🚨\n' : ''}
-
-MEDICAL CONTEXT:
+MEDICAL TEXTBOOK EXCERPTS:
 ${references}
 
 ${patientProfile}
 
-${patient.language_pref !== 'en' ? 'USE MIXED LANGUAGE AS SHOWN IN EXAMPLES ABOVE!' : ''}`;
-    
+REMEMBER: You have access to the full conversation history. Use it to provide contextual, personalized advice that builds on what you already know about the patient.
+
+START DIRECTLY with patient's name and medical advice. NO greetings.`;
+
     // ========================================
     // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
     // ========================================
@@ -1808,15 +1514,15 @@ ${patient.language_pref !== 'en' ? 'USE MIXED LANGUAGE AS SHOWN IN EXAMPLES ABOV
     });
     
     console.log(`📤 Sending ${conversationHistory.length} messages to Claude`);
-    
+
     // ========================================
     // 🤖 CALL CLAUDE WITH FULL CONTEXT
     // ========================================
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
-      max_tokens: 200,  // ✅ Reduced from 600 for concise responses
+      max_tokens: 600,
       system,
-      messages: conversationHistory
+      messages: conversationHistory  // ✅ NOW INCLUDES HISTORY!
     }, {
       headers: {
         'x-api-key': ANTHROPIC_API_KEY,
@@ -1825,7 +1531,7 @@ ${patient.language_pref !== 'en' ? 'USE MIXED LANGUAGE AS SHOWN IN EXAMPLES ABOV
       },
       timeout: 20000
     });
-    
+
     const text = response.data?.content?.[0]?.text;
     
     if (text) {
@@ -1883,16 +1589,16 @@ function extractGlucose(msg) {
   const match = msg.match(/(\d{2,3})/);
   const reading = match ? parseInt(match[1]) : null;
   if (!reading || reading < 40 || reading > 500) return { hasReading: false };
-  
+
   const lower = msg.toLowerCase();
   const type = lower.match(/fasting|empty|morning/) ? 'fasting' :
                lower.match(/after|post|lunch|dinner/) ? 'postprandial' : 'random';
-  
+
   const symptoms = [];
   ['tired', 'dizzy', 'thirsty', 'blur', 'sweat', 'weak'].forEach(s => {
     if (lower.includes(s)) symptoms.push(s);
   });
-  
+
   return { hasReading: true, reading, readingType: type, symptoms, notes: msg.substring(0, 200) };
 }
 
@@ -1900,7 +1606,7 @@ async function checkCritical(reading, type, phone) {
   const t = THRESHOLDS[type] || THRESHOLDS.random;
   let critical = false;
   let urgency = 'MONITORING';
-  
+
   if (reading < 54 || reading > 400) {
     critical = true;
     urgency = 'EMERGENCY';
@@ -1908,12 +1614,12 @@ async function checkCritical(reading, type, phone) {
     critical = true;
     urgency = 'URGENT';
   }
-  
+
   if (critical && PHYSICIAN_PHONE && PHYSICIAN_PHONE !== '+919876543210') {
     await sendWhatsAppMessage(PHYSICIAN_PHONE, 
       `🚨 ${urgency}\nPatient: ${phone}\nGlucose: ${reading} mg/dL`);
   }
-  
+
   return { critical, urgency };
 }
 
@@ -1930,34 +1636,35 @@ app.get('/webhook', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
-  
+
   try {
     const msg = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
-    
+
     const from = msg.from;
     const messageType = msg.type;
     let text = '';
     let isVoiceMessage = false;
-    
+
     console.log(`\n📨 Message from: ${from} (${messageType})`);
-    
+
     if (messageType === 'text') {
       text = msg.text.body;
       
     } else if (messageType === 'audio') {
       isVoiceMessage = true;
       
+      const patient = await Patient.findOne({ phone: from });
+      const langCode = patient?.language_pref || 'en';
+      
       try {
-        // ✅ Let Whisper auto-detect language (don't pass preference)
-        text = await transcribeWhatsAppAudio(msg.audio.id);
+        text = await transcribeWhatsAppAudio(msg.audio.id, langCode);
         
         if (!text) {
           await sendWhatsAppMessage(from, "Couldn't hear clearly. Try text. 😊");
           return;
         }
         
-        const patient = await Patient.findOne({ phone: from });
         if (patient) {
           await Patient.findOneAndUpdate(
             { phone: from },
@@ -1967,16 +1674,7 @@ app.post('/webhook', async (req, res) => {
         
       } catch (error) {
         console.error('❌ Transcription failed:', error.message);
-        
-        // ✅ IMPROVED: Better error messages for credit issues
-        if (error.message.includes('credits') || error.message.includes('insufficient_quota')) {
-          await sendWhatsAppMessage(from, 
-            "🎙️ Voice feature temporarily unavailable.\n\n" +
-            "💡 Tip: Add OpenAI credits to enable voice!\n\n" +
-            "Please send text for now. 😊");
-        } else {
-          await sendWhatsAppMessage(from, "Voice error. Please send text. 😊");
-        }
+        await sendWhatsAppMessage(from, "Voice error. Please send text. 😊");
         return;
       }
       
@@ -1984,230 +1682,10 @@ app.post('/webhook', async (req, res) => {
       console.log(`⚠️  Unsupported type: ${messageType}`);
       return;
     }
-    
-    // ========================================
-    // 📝 PREPARE TEXT FOR PROCESSING
-    // ========================================
-    const lowerText = text.toLowerCase().trim();
-    
-    // ========================================
-    // 🌐 LANGUAGE SWITCH COMMANDS
-    // ========================================
-    if (lowerText === 'hindi' || lowerText === 'हिंदी' || lowerText === 'switch to hindi') {
-      console.log(`🌐 Manual switch to Hindi from ${from}`);
-      
-      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'hi' });
-      await sendWhatsAppMessage(from, 
-        `✅ Language switched to Hindi!\n\n` +
-        `Ab main Hinglish mein reply karunga. Aapka sugar reading bataiye! 😊`
-      );
-      return;
-    }
-    
-    if (lowerText === 'kannada' || lowerText === 'ಕನ್ನಡ' || lowerText === 'switch to kannada') {
-      console.log(`🌐 Manual switch to Kannada from ${from}`);
-      
-      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'kn' });
-      await sendWhatsAppMessage(from, 
-        `✅ Language switched to Kannada!\n\n` +
-        `Eeega naanu Kanglish nalli reply maadtini. Nimmadu sugar reading heli! 😊`
-      );
-      return;
-    }
-    
-    if (lowerText === 'english' || lowerText === 'switch to english') {
-      console.log(`🌐 Manual switch to English from ${from}`);
-      
-      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'en' });
-      await sendWhatsAppMessage(from, 
-        `✅ Language switched to English!\n\n` +
-        `I'll respond in English now. What's your sugar reading? 😊`
-      );
-      return;
-    }
-    
-    // ========================================
-    // 🔓 BYPASS COMMAND (Admin/Testing - Skip Onboarding)
-    // ========================================
-    if (lowerText === 'bypasssaad') {
-      console.log(`🔓 BYPASS command from ${from}`);
-      
-      try {
-        // Check if user already exists and is registered
-        let patient = await Patient.findOne({ phone: from });
-        
-        if (patient && patient.onboarding_completed) {
-          // Already registered and bypassed
-          await sendWhatsAppMessage(from,
-            `✅ Already bypassed!\n\n` +
-            `You're all set. Send your glucose reading or ask anything! 😊`
-          );
-          return;
-        }
-        
-        // Create minimal patient profile (bypass onboarding)
-        patient = await Patient.findOneAndUpdate(
-          { phone: from },
-          {
-            phone: from,
-            language_pref: 'en',
-            full_name: 'Test User',
-            age: 30,
-            gender: 'Male',
-            emergency_contact: '+919999999999',
-            pincode: '560001',
-            consent_given: true,
-            diabetes_type: 'Type 2',
-            duration_years: 5,
-            medication_type: 'Tablets',
-            current_meds: ['Metformin'],
-            comorbidities: ['None'],
-            last_hba1c: null,
-            diet_preference: 'Veg',
-            onboarding_completed: true,
-            onboarding_step: 'completed',
-            registeredAt: new Date(),
-            lastActive: new Date()
-          },
-          { upsert: true, new: true }
-        );
-        
-        // Delete any incomplete onboarding state
-        await OnboardingState.findOneAndDelete({ phone: from });
-        
-        console.log(`✅ Bypass complete for ${from} - created Test User profile`);
-        
-        await sendWhatsAppMessage(from,
-          `🔓 BYPASS ACTIVATED!\n\n` +
-          `✅ Onboarding skipped\n` +
-          `✅ Test profile created\n` +
-          `✅ Name: Test User\n\n` +
-          `You can now chat directly! 💬\n\n` +
-          `Try:\n` +
-          `• "My sugar is 150"\n` +
-          `• "Diet advice"\n` +
-          `• "मेरा sugar 120 hai" (Hindi)\n\n` +
-          `💡 Type "RESET" for normal registration.`
-        );
-        
-        return;
-        
-      } catch (error) {
-        console.error(`❌ Bypass error for ${from}:`, error.message);
-        console.error(error.stack);
-        await sendWhatsAppMessage(from, 
-          `❌ Bypass failed: ${error.message}\n\nTry "RESET" instead.`
-        );
-        return;
-      }
-    }
-    
-    // ========================================
-    // 🔄 RESET COMMAND (User Self-Reset)
-    // ========================================
-    if (lowerText === 'reset') {
-      console.log(`🔄 RESET command from ${from}`);
-      
-      try {
-        // Delete all user data
-        await Patient.findOneAndDelete({ phone: from });
-        await OnboardingState.findOneAndDelete({ phone: from });
-        await GlucoseReading.deleteMany({ patientPhone: from });
-        await Conversation.deleteMany({ patientPhone: from });
-        await Triage.deleteMany({ patientPhone: from });
-        
-        console.log(`✅ User reset complete: ${from}`);
-        
-        // Send confirmation and start fresh
-        await sendWhatsAppMessage(from, 
-          `✅ Account reset complete!\n\n` +
-          `All your data has been deleted.\n\n` +
-          `Let's start fresh! 🎉\n\n` +
-          MESSAGES.welcome.en
-        );
-        
-        return; // Exit here, onboarding will start with next message
-      } catch (error) {
-        console.error(`❌ Reset error for ${from}:`, error.message);
-        await sendWhatsAppMessage(from, 
-          `Sorry, reset failed. Please try again or contact support.`
-        );
-        return;
-      }
-    }
-    
-    // ========================================
-    // 🌐 MANUAL LANGUAGE SWITCH COMMANDS
-    // ========================================
-    if (lowerText === 'english' || lowerText === 'eng') {
-      const patient = await Patient.findOne({ phone: from });
-      if (patient) {
-        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'en' });
-        await sendWhatsAppMessage(from, 
-          `✅ Language switched to English!\n\n` +
-          `I'll now respond in English. 😊`
-        );
-        console.log(`🌐 Manual language switch: ${from} → English`);
-        return;
-      }
-    }
-    
-    if (lowerText === 'hindi' || lowerText === 'हिंदी' || lowerText === 'hin') {
-      const patient = await Patient.findOne({ phone: from });
-      if (patient) {
-        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'hi' });
-        await sendWhatsAppMessage(from, 
-          `✅ Language Hinglish mein switch ho gaya!\n\n` +
-          `Ab main Hinglish mein respond karunga. 😊`
-        );
-        console.log(`🌐 Manual language switch: ${from} → Hindi`);
-        return;
-      }
-    }
-    
-    if (lowerText === 'kannada' || lowerText === 'ಕನ್ನಡ' || lowerText === 'kan') {
-      const patient = await Patient.findOne({ phone: from });
-      if (patient) {
-        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'kn' });
-        await sendWhatsAppMessage(from, 
-          `✅ Language Kannada ge switch aayitu!\n\n` +
-          `Naanu Kanglish nalli respond maadthini. 😊`
-        );
-        console.log(`🌐 Manual language switch: ${from} → Kannada`);
-        return;
-      }
-    }
-    
-    // ========================================
-    // 🆕 START COMMAND (Restart Onboarding)
-    // ========================================
-    if (lowerText === 'start' || lowerText === 'begin') {
-      console.log(`🆕 START command from ${from}`);
-      
-      // Check if user already exists
-      const existingPatient = await Patient.findOne({ phone: from });
-      
-      if (existingPatient && existingPatient.onboarding_completed) {
-        // User already registered
-        await sendWhatsAppMessage(from,
-          `👋 Welcome back ${existingPatient.full_name}!\n\n` +
-          `You're already registered.\n\n` +
-          `Send your glucose reading or ask me anything! 😊\n\n` +
-          `💡 Commands:\n` +
-          `• Type "RESET" to delete all data\n` +
-          `• Type "ENGLISH", "HINDI", or "KANNADA" to switch language`
-        );
-      } else {
-        // New user or incomplete onboarding - show welcome
-        await sendWhatsAppMessage(from, MESSAGES.welcome.en);
-      }
-      
-      return;
-    }
-    
+
     // CHECK ONBOARDING
     const onboardingStatus = await checkOnboardingStatus(from);
-    
+
     if (onboardingStatus.needsOnboarding) {
       if (isVoiceMessage) {
         await sendWhatsAppMessage(from, 
@@ -2229,42 +1707,17 @@ app.post('/webhook', async (req, res) => {
       }
       return;
     }
-    
+
     // PROCESS WITH CLAUDE + RAG
-    let patient = onboardingStatus.patient;
-    
-    // ========================================
-    // 🌐 AUTO-DETECT AND UPDATE LANGUAGE
-    // ========================================
-    const detectedLang = detectLanguage(text);
-    const currentLang = patient.language_pref || 'en';
-    
-    console.log(`📝 Message: "${text.substring(0, 50)}..."`);
-    console.log(`🌐 Current lang: ${currentLang}, Detected: ${detectedLang}`);
-    
-    // ALWAYS use detected language for this response (even if not switched permanently)
-    let responseLanguage = detectedLang;
-    
-    if (detectedLang !== currentLang) {
-      // Update database for future messages
-      await updateLanguagePreference(from, detectedLang, currentLang);
-      
-      // Update patient object for THIS response
-      patient.language_pref = detectedLang;
-      
-      console.log(`✅ Language switched: ${currentLang} → ${detectedLang}`);
-      console.log(`🔥 FORCING ${detectedLang.toUpperCase()} response for this message!`);
-    }
-    
-    // Pass the updated patient object to Claude
+    const patient = onboardingStatus.patient;
     const reply = await analyzeWithClaudeRAG(from, text, patient);
-    
+
     if (!reply || reply.length === 0) {
       console.error('❌ Empty Claude response!');
       await sendWhatsAppMessage(from, fallbackResponse(text));
       return;
     }
-    
+
     // SEND RESPONSE
     if (isVoiceMessage && voiceEnabled) {
       const success = await sendVoiceResponse(from, reply, patient.language_pref || 'en');
@@ -2274,7 +1727,7 @@ app.post('/webhook', async (req, res) => {
     } else {
       await sendWhatsAppMessage(from, reply);
     }
-    
+
     // PROCESS GLUCOSE
     const data = extractGlucose(text);
     if (data.hasReading) {
@@ -2396,20 +1849,16 @@ app.get('/admin/conversation/:phone', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.4.0-LANGUAGE-FIX',
+    version: '7.1.0-MEMORY',
     onboarding: 'Simple & Fast (NO AI)',
-    medical: 'Claude + RAG + FORCED Language',
-    voice: 'OpenAI TTS (High Quality)',
+    medical: 'Claude + RAG + Conversation Memory',
+    voice: OPENAI_API_KEY ? 'enabled' : 'disabled',
     features: {
-      onboarding: '✅ Reliable',
-      medical_ai: '✅ Claude + RAG - SHORT responses',
+      onboarding: '✅ Reliable (no AI dependency)',
+      medical_ai: '✅ Claude + RAG',
       conversation_memory: '✅ Remembers context',
-      voice_input: voiceEnabled ? '✅ Whisper STT' : '❌ Disabled',
-      voice_output: voiceEnabled ? '✅ OpenAI TTS (clear)' : '❌ Disabled',
-      multilang: '✅ EN/HI/KN + Auto-detect',
-      language_switching: '✅ Auto-updates based on user language',
-      language_forcing: '✅ FORCED Hinglish/Kanglish responses',
-      response_style: '✅ Short & conversational (40-50 words)',
+      voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled',
+      multilang: '✅ EN/HI/KN',
       triage: '✅ Automatic'
     }
   });
@@ -2426,7 +1875,7 @@ cron.schedule('0 8 * * *', async () => {
   });
   
   for (const p of patients) {
-    const greeting = p.language_pref === 'hi' ? '🌅 Good morning' :
+    const greeting = p.language_pref === 'hi' ? '🌅 Good morning' : 
                      p.language_pref === 'kn' ? '🌅 Good morning' : '🌅 Good morning';
     await sendWhatsAppMessage(p.phone, `${greeting} ${p.full_name}! Time for meds & glucose check 😊`);
   }
@@ -2454,35 +1903,24 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.6 - BYPASS READY!🔓 ║
+║  GLUCO SAHAYAK v7.0 - RELIABLE        ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
-║  🎙️  Voice: Google Cloud TTS (Natural)║
-║  🌐 Language: Auto + Manual Switch    ║
-║  🔄 Commands: RESET, START, BYPASS    ║
+║  🎙️  Voice: ${OPENAI_API_KEY ? '✅' : '❌'}                      ║
 ╠════════════════════════════════════════╣
-║  USER COMMANDS:                       ║
-║    • "RESET" - Delete all & restart   ║
-║    • "START" - Begin onboarding       ║
-║    • "bypasssaad" - Skip to chat 🔓  ║
-║    • "HINDI" / "KANNADA" - Switch lang║
-║  BYPASS MODE (Testing/Demo):         ║
-║    • Creates test profile instantly   ║
-║    • Skips all 12 onboarding questions║
-║    • Go straight to conversation      ║
+║  IMPROVEMENTS:                        ║
+║    ✅ Zero AI dependency onboarding   ║
+║    ✅ Fast, reliable responses        ║
+║    ✅ One question at a time          ║
+║    ✅ Flexible input parsing          ║
+║    ✅ Can't fail                      ║
+║    💡 AI only for medical queries     ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
 📝 Process PDFs: POST /admin/process-pdfs
 🔧 Reset user: POST /admin/reset-user
 📊 Status: GET /admin/health
-
-💡 Quick test: Type "bypasssaad" → skip onboarding → start chatting!
-   Language switching: Type "HINDI" or "KANNADA" anytime
-   • Type "KANNADA" for Kanglish  
-   • Type "ENGLISH" for English
-   
-🎙️  Voice powered by Google Cloud TTS Wavenet (much more natural!)
 `));
