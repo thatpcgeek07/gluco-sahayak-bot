@@ -258,29 +258,103 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
 
 async function speakResponse(text, language = 'en') {
   try {
+    console.log(`🗣️  Generating speech with Google Cloud TTS (${language})...`);
+    
+    // Google Cloud TTS has MUCH better Indian voices than OpenAI
+    // Wavenet voices sound very natural and human-like
+    
+    const voiceMap = {
+      'en': { languageCode: 'en-IN', name: 'en-IN-Wavenet-D', gender: 'MALE' },      // Indian English - Natural male
+      'hi': { languageCode: 'hi-IN', name: 'hi-IN-Wavenet-D', gender: 'MALE' },      // Hindi - Natural male  
+      'kn': { languageCode: 'kn-IN', name: 'kn-IN-Wavenet-A', gender: 'FEMALE' }     // Kannada - Natural female
+    };
+    
+    const voice = voiceMap[language] || voiceMap['en'];
+    
+    // Build request for Google Cloud TTS
+    const request = {
+      input: { text: text },
+      voice: {
+        languageCode: voice.languageCode,
+        name: voice.name,
+        ssmlGender: voice.gender
+      },
+      audioConfig: {
+        audioEncoding: 'MP3',
+        speakingRate: 0.85,  // Slightly slower for elderly users
+        pitch: 0.0,          // Normal pitch
+        volumeGainDb: 0.0    // Normal volume
+      }
+    };
+    
+    // Use Google Cloud TTS API
+    const response = await axios.post(
+      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_CLOUD_API_KEY || OPENAI_API_KEY}`,
+      request,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+    
+    // Decode base64 audio
+    const audioContent = response.data.audioContent;
+    const audioBuffer = Buffer.from(audioContent, 'base64');
+    
+    // Save audio file
+    const tempDir = '/tmp/whatsapp-tts';
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const timestamp = Date.now();
+    const fileName = `tts_google_${language}_${timestamp}.mp3`;
+    const filePath = path.join(tempDir, fileName);
+    
+    fs.writeFileSync(filePath, audioBuffer);
+    
+    console.log(`✅ Speech generated (Google Cloud TTS - ${voice.name})`);
+    return filePath;
+    
+  } catch (error) {
+    console.error('❌ Google TTS error:', error.message);
+    
+    // If Google Cloud not configured, try OpenAI TTS
+    if (error.response?.status === 403 || error.response?.status === 401) {
+      console.log('⚠️  Google Cloud TTS not configured, trying OpenAI TTS...');
+      return await speakResponseOpenAI(text, language);
+    }
+    
+    // Otherwise fallback to gTTS
+    console.log('⚠️  Falling back to gTTS...');
+    return await speakResponseGTTS(text, language);
+  }
+}
+
+// OpenAI TTS function (fallback)
+async function speakResponseOpenAI(text, language = 'en') {
+  try {
     console.log(`🗣️  Generating speech with OpenAI TTS (${language})...`);
     
     if (!OPENAI_API_KEY) {
-      throw new Error('OpenAI API key required for voice');
+      throw new Error('OpenAI API key required');
     }
     
-    // OpenAI TTS voices - much better quality!
     const voiceMap = {
-      'en': 'alloy',    // Clear American English
-      'hi': 'nova',     // Works well for Hindi
-      'kn': 'nova'      // Works well for Kannada
+      'en': 'alloy',
+      'hi': 'nova',
+      'kn': 'nova'
     };
     
     const voice = voiceMap[language] || 'alloy';
     
-    // Call OpenAI TTS API
     const response = await axios.post(
       'https://api.openai.com/v1/audio/speech',
       {
-        model: 'tts-1',  // Faster, cheaper model
+        model: 'tts-1',
         voice: voice,
         input: text,
-        speed: 0.9  // Slightly slower for elderly users
+        speed: 0.85
       },
       {
         headers: {
@@ -292,14 +366,13 @@ async function speakResponse(text, language = 'en') {
       }
     );
     
-    // Save audio file
     const tempDir = '/tmp/whatsapp-tts';
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
     
     const timestamp = Date.now();
-    const fileName = `tts_${language}_${timestamp}.mp3`;
+    const fileName = `tts_openai_${language}_${timestamp}.mp3`;
     const filePath = path.join(tempDir, fileName);
     
     fs.writeFileSync(filePath, response.data);
@@ -309,10 +382,7 @@ async function speakResponse(text, language = 'en') {
     
   } catch (error) {
     console.error('❌ OpenAI TTS error:', error.message);
-    
-    // Fallback to gTTS if OpenAI fails
-    console.log('⚠️  Falling back to gTTS...');
-    return await speakResponseGTTS(text, language);
+    throw error;
   }
 }
 
@@ -560,7 +630,11 @@ I'll help you with:
 
 Ready to start! What's your current glucose reading?
 
-💡 Tip: Type "RESET" anytime to start fresh.`,
+💡 Quick commands:
+• "RESET" - Delete all data
+• "HINDI" - Switch to Hinglish
+• "KANNADA" - Switch to Kanglish
+• "ENGLISH" - Switch to English`,
     hi: `✅ हो गया {name} जी!
 
 Profile तैयार! 🎉
@@ -574,7 +648,11 @@ Profile तैयार! 🎉
 
 तैयार! Current glucose reading?
 
-💡 "RESET" लिखें नया शुरू करने के लिए।`,
+💡 Commands:
+• "RESET" - सब delete
+• "HINDI" - Hinglish में
+• "KANNADA" - Kanglish में  
+• "ENGLISH" - English में`,
     kn: `✅ ಮುಗಿಯಿತು {name}!
 
 Profile ready! 🎉
@@ -588,7 +666,11 @@ Profile ready! 🎉
 
 ತಯಾರು! Current glucose reading?
 
-💡 "RESET" ಹೊಸದಾಗಿ ಪ್ರಾರಂಭಿಸಲು.`
+💡 Commands:
+• "RESET" - ಎಲ್ಲಾ delete
+• "HINDI" - Hinglish
+• "KANNADA" - Kanglish
+• "ENGLISH" - English`
   },
   
   error_retry: {
@@ -1625,51 +1707,54 @@ ${glucoseSummary}
     
     if (patient.language_pref === 'hi') {
       languageInstruction = `
-⚠️ CRITICAL: RESPOND IN HINGLISH (Hindi + English mix) ⚠️
+🚨🚨🚨 CRITICAL: RESPOND IN HINGLISH 🚨🚨🚨
 
-YOU MUST respond in Hinglish - NOT pure English, NOT pure Hindi.
-Mix Hindi and English naturally like people talk in India.
+YOU MUST USE HINGLISH - THIS IS NON-NEGOTIABLE!
+DO NOT RESPOND IN PURE ENGLISH!
 
-MANDATORY HINGLISH WORDS TO USE:
-- aapka/tumhara (your)
-- hai/hain (is/are)  
-- karo/karna (do)
-- piyo/peena (drink)
-- khao/khana (eat)
-- theek (okay/fine)
-- zyada (more)
-- kam (less)
-- bohot (very)
-- turant (immediately)
-- abhi (now)
+HINGLISH = Hindi + English mixed naturally
 
-KEEP MEDICAL TERMS IN ENGLISH: sugar, medicine, doctor, hospital`;
+MANDATORY WORDS YOU MUST USE:
+- aapka/tumhara (NOT "your")
+- hai (NOT "is")  
+- karo (NOT "do")
+- piyo (NOT "drink")
+- khao (NOT "eat")
+- theek (NOT "okay")
+- zyada (NOT "high/more")
+- kam (NOT "low/less")
+
+KEEP MEDICAL TERMS IN ENGLISH: sugar, medicine, doctor`;
 
       responseExample = `
-EXAMPLE - User says: "Mera sugar 180 hai"
-YOU MUST RESPOND: "Aapka sugar 180 hai, thoda high. 10 minute walk karo aur paani piyo. Rice kam khao."
+CORRECT EXAMPLE:
+User: "Mera sugar 180 hai"
+YOU MUST SAY: "Aapka sugar 180 hai, thoda zyada. Walk karo aur paani piyo."
 
-DO NOT RESPOND: "Your sugar is 180, slightly high..." ❌ WRONG - this is pure English!`;
+WRONG - DO NOT DO THIS:
+"Your sugar is 180, slightly high..." ❌ THIS IS PURE ENGLISH!
+
+REMEMBER: USE HINGLISH, NOT ENGLISH!`;
       
     } else if (patient.language_pref === 'kn') {
       languageInstruction = `
-⚠️ CRITICAL: RESPOND IN KANGLISH (Kannada + English mix) ⚠️
+🚨🚨🚨 CRITICAL: RESPOND IN KANGLISH 🚨🚨🚨
 
-YOU MUST respond in Kanglish - NOT pure English.
+YOU MUST USE KANGLISH - THIS IS NON-NEGOTIABLE!
 
-MANDATORY KANGLISH WORDS:
-- nimmadu/nimage (your)
-- ide (is)
-- maadi (do)
-- kuDi (drink)
-- thinni (eat)
-- chennagide (good)
+KANGLISH = Kannada + English mixed
+
+MANDATORY WORDS:
+- nimmadu (NOT "your")
+- ide (NOT "is")
+- maadi (NOT "do")
+- kuDi (NOT "drink")
 
 KEEP MEDICAL TERMS IN ENGLISH.`;
 
       responseExample = `
-EXAMPLE - User: "Nanna sugar 180"
-YOU RESPOND: "Nimmadu 180, slightly high ide. Walk maadi, water kuDi."`;
+CORRECT: "Nimmadu 180, slightly high ide. Walk maadi, water kuDi."
+WRONG: "Your sugar is 180..." ❌`;
       
     } else {
       languageInstruction = `RESPOND IN SIMPLE ENGLISH`;
@@ -1680,26 +1765,28 @@ YOU RESPOND: "Nimmadu 180, slightly high ide. Walk maadi, water kuDi."`;
 
 ${responseExample}
 
-You are Gluco Sahayak - helping elderly/rural diabetes patients.
+🎯 THIS MESSAGE'S LANGUAGE: ${patient.language_pref.toUpperCase()}
+${patient.language_pref !== 'en' ? '⚠️ DO NOT USE PURE ENGLISH - USE MIXED LANGUAGE!' : ''}
+
+You are Gluco Sahayak for elderly/rural patients.
 
 RESPONSE RULES:
 ✅ Maximum 40-50 words
 ✅ 2-3 simple sentences
 ✅ ONE action point
-✅ Warm, friendly tone
-❌ NO medical jargon
-❌ NO long explanations
+❌ NO pure English if language is Hindi/Kannada
+${patient.language_pref === 'hi' ? '❌ NO "your", "is", "do" - USE "aapka", "hai", "karo"!' : ''}
 
-${patient.language_pref !== 'en' ? '⚠️ REMEMBER: Use MIXED language as shown in example above!' : ''}
+MEMORY: Remember conversation. Don't repeat old advice.
 
-MEMORY: Remember conversation history. Don't repeat old advice.
+${patient.language_pref !== 'en' ? '\n🚨 FINAL REMINDER: MIXED LANGUAGE REQUIRED - NOT PURE ENGLISH! 🚨\n' : ''}
 
 MEDICAL CONTEXT:
 ${references}
 
 ${patientProfile}
 
-Keep responses SHORT and in the CORRECT LANGUAGE!`;
+${patient.language_pref !== 'en' ? 'USE MIXED LANGUAGE AS SHOWN IN EXAMPLES ABOVE!' : ''}`;
     
     // ========================================
     // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
@@ -1899,6 +1986,42 @@ app.post('/webhook', async (req, res) => {
     }
     
     // ========================================
+    // 🌐 LANGUAGE SWITCH COMMANDS
+    // ========================================
+    if (lowerText === 'hindi' || lowerText === 'हिंदी' || lowerText === 'switch to hindi') {
+      console.log(`🌐 Manual switch to Hindi from ${from}`);
+      
+      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'hi' });
+      await sendWhatsAppMessage(from, 
+        `✅ Language switched to Hindi!\n\n` +
+        `Ab main Hinglish mein reply karunga. Aapka sugar reading bataiye! 😊`
+      );
+      return;
+    }
+    
+    if (lowerText === 'kannada' || lowerText === 'ಕನ್ನಡ' || lowerText === 'switch to kannada') {
+      console.log(`🌐 Manual switch to Kannada from ${from}`);
+      
+      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'kn' });
+      await sendWhatsAppMessage(from, 
+        `✅ Language switched to Kannada!\n\n` +
+        `Eeega naanu Kanglish nalli reply maadtini. Nimmadu sugar reading heli! 😊`
+      );
+      return;
+    }
+    
+    if (lowerText === 'english' || lowerText === 'switch to english') {
+      console.log(`🌐 Manual switch to English from ${from}`);
+      
+      await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'en' });
+      await sendWhatsAppMessage(from, 
+        `✅ Language switched to English!\n\n` +
+        `I'll respond in English now. What's your sugar reading? 😊`
+      );
+      return;
+    }
+    
+    // ========================================
     // 🔄 RESET COMMAND (User Self-Reset)
     // ========================================
     const lowerText = text.toLowerCase().trim();
@@ -1935,6 +2058,48 @@ app.post('/webhook', async (req, res) => {
     }
     
     // ========================================
+    // 🌐 MANUAL LANGUAGE SWITCH COMMANDS
+    // ========================================
+    if (lowerText === 'english' || lowerText === 'eng') {
+      const patient = await Patient.findOne({ phone: from });
+      if (patient) {
+        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'en' });
+        await sendWhatsAppMessage(from, 
+          `✅ Language switched to English!\n\n` +
+          `I'll now respond in English. 😊`
+        );
+        console.log(`🌐 Manual language switch: ${from} → English`);
+        return;
+      }
+    }
+    
+    if (lowerText === 'hindi' || lowerText === 'हिंदी' || lowerText === 'hin') {
+      const patient = await Patient.findOne({ phone: from });
+      if (patient) {
+        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'hi' });
+        await sendWhatsAppMessage(from, 
+          `✅ Language Hinglish mein switch ho gaya!\n\n` +
+          `Ab main Hinglish mein respond karunga. 😊`
+        );
+        console.log(`🌐 Manual language switch: ${from} → Hindi`);
+        return;
+      }
+    }
+    
+    if (lowerText === 'kannada' || lowerText === 'ಕನ್ನಡ' || lowerText === 'kan') {
+      const patient = await Patient.findOne({ phone: from });
+      if (patient) {
+        await Patient.findOneAndUpdate({ phone: from }, { language_pref: 'kn' });
+        await sendWhatsAppMessage(from, 
+          `✅ Language Kannada ge switch aayitu!\n\n` +
+          `Naanu Kanglish nalli respond maadthini. 😊`
+        );
+        console.log(`🌐 Manual language switch: ${from} → Kannada`);
+        return;
+      }
+    }
+    
+    // ========================================
     // 🆕 START COMMAND (Restart Onboarding)
     // ========================================
     if (lowerText === 'start' || lowerText === 'begin') {
@@ -1949,7 +2114,9 @@ app.post('/webhook', async (req, res) => {
           `👋 Welcome back ${existingPatient.full_name}!\n\n` +
           `You're already registered.\n\n` +
           `Send your glucose reading or ask me anything! 😊\n\n` +
-          `💡 Type "RESET" to delete all data and start fresh.`
+          `💡 Commands:\n` +
+          `• Type "RESET" to delete all data\n` +
+          `• Type "ENGLISH", "HINDI", or "KANNADA" to switch language`
         );
       } else {
         // New user or incomplete onboarding - show welcome
@@ -1985,7 +2152,7 @@ app.post('/webhook', async (req, res) => {
     }
     
     // PROCESS WITH CLAUDE + RAG
-    const patient = onboardingStatus.patient;
+    let patient = onboardingStatus.patient;
     
     // ========================================
     // 🌐 AUTO-DETECT AND UPDATE LANGUAGE
@@ -1996,12 +2163,21 @@ app.post('/webhook', async (req, res) => {
     console.log(`📝 Message: "${text.substring(0, 50)}..."`);
     console.log(`🌐 Current lang: ${currentLang}, Detected: ${detectedLang}`);
     
+    // ALWAYS use detected language for this response (even if not switched permanently)
+    let responseLanguage = detectedLang;
+    
     if (detectedLang !== currentLang) {
+      // Update database for future messages
       await updateLanguagePreference(from, detectedLang, currentLang);
-      patient.language_pref = detectedLang; // Update for current response
-      console.log(`✅ Language switched to ${detectedLang}`);
+      
+      // Update patient object for THIS response
+      patient.language_pref = detectedLang;
+      
+      console.log(`✅ Language switched: ${currentLang} → ${detectedLang}`);
+      console.log(`🔥 FORCING ${detectedLang.toUpperCase()} response for this message!`);
     }
     
+    // Pass the updated patient object to Claude
     const reply = await analyzeWithClaudeRAG(from, text, patient);
     
     if (!reply || reply.length === 0) {
@@ -2199,20 +2375,21 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.5 - USER RESET! 🔄  ║
+║  GLUCO SAHAYAK v7.6 - NATURAL VOICE!🎙️║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  🚀 Onboarding: SIMPLE (No AI)        ║
 ║  🤖 Medical: Claude + RAG             ║
-║  🎙️  Voice: OpenAI TTS (High Quality) ║
-║  🌐 Auto Language: ✅                 ║
-║  🔄 User Commands: RESET, START       ║
+║  🎙️  Voice: Google Cloud TTS (Natural)║
+║  🌐 Language: Auto + Manual Switch    ║
+║  🔄 Commands: RESET, START, LANG      ║
 ╠════════════════════════════════════════╣
 ║  NEW IN THIS VERSION:                 ║
-║    ✅ Type "RESET" to restart         ║
-║    ✅ Type "START" to begin           ║
-║    ✅ Users can self-reset anytime    ║
-║    ✅ Clean slate for testing         ║
+║    ✅ Google Cloud TTS (natural voice)║
+║    ✅ Switch language: HINDI, KANNADA ║
+║    ✅ Wavenet voices (human-like)     ║
+║    ✅ Perfect Indian accent           ║
+║    ✅ No reset needed to switch!      ║
 ╚════════════════════════════════════════╝
 
 🎉 PRODUCTION READY!
@@ -2220,5 +2397,10 @@ app.listen(PORT, () => console.log(`
 🔧 Reset user: POST /admin/reset-user
 📊 Status: GET /admin/health
 
-💡 Users can now type "RESET" to delete their data and start fresh!
+💡 Language switching:
+   • Type "HINDI" for Hinglish
+   • Type "KANNADA" for Kanglish  
+   • Type "ENGLISH" for English
+   
+🎙️  Voice powered by Google Cloud TTS Wavenet (much more natural!)
 `));
