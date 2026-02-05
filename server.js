@@ -877,7 +877,102 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
+async function handleOnboarding(phone, message) {
+  try {
+    console.log(`🔧 Onboarding: ${phone} → "${message}"`);
+        
+    let state = await OnboardingState.findOne({ phone });
+        
+    // New user
+    if (!state) {
+      console.log(`🆕 New user: ${phone}`);
+      state = await OnboardingState.create({
+        phone,
+        currentStep: 'language',
+        data: new Map()
+      });
+            
+      return { response: MESSAGES.welcome.en, completed: false };
+    }
 
+    const lang = state.data.get('language_pref') || 'en';
+    let response = '';
+    let nextStep = state.currentStep;
+
+    // STEP-BY-STEP PROCESSING
+    switch (state.currentStep) {
+      case 'language': {
+        const parsedLang = parseLanguage(message);
+        if (parsedLang) {
+          state.data.set('language_pref', parsedLang);
+          nextStep = 'name';
+          response = MESSAGES.ask_name[parsedLang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.welcome[lang];
+        }
+        break;
+      }
+      
+      case 'name': {
+        const parsedName = parseName(message);
+        if (parsedName) {
+          state.data.set('full_name', parsedName);
+          nextStep = 'age';
+          response = MESSAGES.ask_age[lang].replace('{name}', parsedName);
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_name[lang];
+        }
+        break;
+      }
+      
+      case 'age': {
+        const parsedAge = parseAge(message);
+        if (parsedAge) {
+          state.data.set('age', parsedAge);
+          nextStep = 'gender';
+          response = MESSAGES.ask_gender[lang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_age[lang].replace('{name}', state.data.get('full_name') || '');
+        }
+        break;
+      }
+      
+      case 'gender': {
+        const parsedGender = parseGender(message);
+        if (parsedGender) {
+          state.data.set('gender', parsedGender);
+          nextStep = 'emergency_contact';
+          response = MESSAGES.ask_emergency[lang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_gender[lang];
+        }
+        break;
+      }
+      
+      case 'emergency_contact': {
+        const parsedPhone = parsePhone(message);
+        if (parsedPhone) {
+          state.data.set('emergency_contact', parsedPhone);
+          nextStep = 'pincode';
+          response = MESSAGES.ask_pincode[lang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_emergency[lang];
+        }
+        break;
+      }
+      
+      case 'pincode': {
+        const parsedPincode = parsePincode(message);
+        if (parsedPincode) {
+          state.data.set('pincode', parsedPincode);
+          nextStep = 'consent';
+          response = MESSAGES.ask_consent[lang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_pincode[lang];
+        }
+        break;
+      }
+      
       case 'consent': {
         const parsedConsent = parseConsent(message);
         if (parsedConsent !== null) {
@@ -889,7 +984,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-
+      
       case 'diabetes_type': {
         const parsedType = parseDiabetesType(message);
         if (parsedType) {
@@ -901,7 +996,7 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-
+      
       case 'duration': {
         const parsedDuration = parseDuration(message);
         if (parsedDuration !== null) {
@@ -913,12 +1008,12 @@ async function handleOnboarding(phone, message) {
         }
         break;
       }
-
+      
       case 'medication_type': {
         const parsedMedType = parseMedicationType(message);
         if (parsedMedType) {
           state.data.set('medication_type', parsedMedType);
-          
+                    
           // Skip medicine names if "None"
           if (parsedMedType === 'None') {
             state.data.set('current_meds', ['None']);
@@ -928,6 +1023,85 @@ async function handleOnboarding(phone, message) {
             nextStep = 'medicine_names';
             response = MESSAGES.ask_medicine_names[lang];
           }
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_medication[lang];
+        }
+        break;
+      }
+      
+      case 'medicine_names': {
+        const parsedMeds = parseMedicineNames(message);
+        state.data.set('current_meds', parsedMeds);
+        nextStep = 'diet';
+        response = MESSAGES.ask_diet[lang];
+        break;
+      }
+      
+      case 'diet': {
+        const parsedDiet = parseDiet(message);
+        if (parsedDiet) {
+          state.data.set('diet_preference', parsedDiet);
+          nextStep = 'comorbidities';
+          response = MESSAGES.ask_comorbidities[lang];
+        } else {
+          response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_diet[lang];
+        }
+        break;
+      }
+      
+      case 'comorbidities': {
+        const parsedComorb = parseComorbidities(message);
+        state.data.set('comorbidities', parsedComorb);
+        nextStep = 'hba1c';
+        response = MESSAGES.ask_hba1c[lang];
+        break;
+      }
+      
+      case 'hba1c': {
+        const parsedHba1c = parseHbA1c(message);
+        state.data.set('last_hba1c', parsedHba1c);
+                
+        // SAVE TO DATABASE
+        await savePatientData(phone, state.data);
+                
+        nextStep = 'completed';
+        response = MESSAGES.complete[lang].replace('{name}', state.data.get('full_name') || 'friend');
+        break;
+      }
+      
+      default:
+        console.error(`❌ Unknown step: ${state.currentStep}`);
+        nextStep = 'language';
+        response = "Something went wrong. Type 'start' to begin again.";
+    }
+
+    // ✅ ✅ ✅ THIS IS THE CRITICAL FIX ✅ ✅ ✅
+    // Don't try to save state if onboarding is completed
+    // (savePatientData already deleted the OnboardingState document)
+    if (nextStep === 'completed') {
+      console.log(`✅ Onboarding completed for ${phone}`);
+      return { response, completed: true };
+    }
+
+    // Save state (only for non-completed steps)
+    state.currentStep = nextStep;
+    state.lastUpdated = new Date();
+    await state.save();
+        
+    console.log(`✅ Step: ${state.currentStep} → Response: ${response.length} chars`);
+        
+    return { response, completed: nextStep === 'completed' };
+  
+  } catch (error) {
+    console.error('❌ Onboarding error:', error.message);
+    console.error(error.stack);
+        
+    return {
+      response: "Sorry, an error occurred. Please type 'start' to begin again.",
+      completed: false
+    };
+  }
+}
         } else {
           response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.ask_medication[lang];
         }
