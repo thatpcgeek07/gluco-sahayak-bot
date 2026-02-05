@@ -29,8 +29,8 @@ if (!WHATSAPP_TOKEN) console.error('❌ WHATSAPP_TOKEN not set');
 if (!WHATSAPP_PHONE_ID) console.error('❌ WHATSAPP_PHONE_ID not set');
 if (!VERIFY_TOKEN) console.error('❌ VERIFY_TOKEN not set');
 if (!MONGODB_URI) console.error('❌ MONGODB_URI not set');
-if (!ANTHROPIC_API_KEY) console.warn('⚠️  ANTHROPIC_API_KEY not set - using fallback responses');
-if (!OPENAI_API_KEY) console.warn('⚠️  OPENAI_API_KEY not set - voice features disabled');
+if (!ANTHROPIC_API_KEY) console.warn('⚠️  ANTHROPIC_API_KEY not set - using fallback');
+if (!OPENAI_API_KEY) console.warn('⚠️  OPENAI_API_KEY not set - voice disabled');
 
 const MEDICAL_PDF_FILES = [
   { fileId: '1bG1owFgs9AfJRc3c8XGJDTGzshyVqfYM', filename: 'medical_textbook_1.pdf', source: 'Medical_Reference_1' },
@@ -170,7 +170,7 @@ async function initializeRAGSystem() {
 }
 
 // ========================================
-// VOICE MODULE (FREE - OpenAI Whisper + gTTS)
+// VOICE MODULE (OpenAI Whisper + gTTS)
 // ========================================
 
 async function downloadWhatsAppAudio(mediaId) {
@@ -363,296 +363,181 @@ async function sendVoiceResponse(to, text, language = 'en') {
 }
 
 // ========================================
-// MULTI-LANGUAGE MESSAGES (NO "NAMASTE")
+// AI-POWERED ONBOARDING SYSTEM
 // ========================================
+
+async function parseWithClaude(userMessage, context) {
+  if (!isClaudeAvailable) return null;
+
+  const prompt = `Extract information from this message: "${userMessage}"
+
+Context: ${context}
+
+Extract and return ONLY valid JSON (no markdown, no explanation):
+{
+  "name": "full name or null",
+  "age": number or null,
+  "gender": "Male" or "Female" or null,
+  "emergency_contact": "10-digit number with +91 prefix or null",
+  "pincode": "6-digit string or null",
+  "consent": true/false/null,
+  "diabetes_type": "Type 1" or "Type 2" or "Gestational" or null,
+  "duration_years": number or null,
+  "medication_type": "Tablets" or "Insulin" or "Both" or "None" or null,
+  "medicine_names": ["list of medicines"] or null,
+  "comorbidities": ["BP", "Cholesterol", etc.] or ["None"] or null,
+  "hba1c": number or null,
+  "diet": "Veg" or "Non-Veg" or "Eggetarian" or null
+}
+
+Rules:
+- Extract ALL fields present
+- Be flexible with formats
+- Numbers can be spelled out
+- Accept M/F for gender
+- Infer from context
+- Return null for missing fields`;
+
+  try {
+    const response = await axios.post(CLAUDE_API_URL, {
+      model: CLAUDE_MODEL,
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      timeout: 10000
+    });
+
+    const text = response.data?.content?.[0]?.text;
+    if (!text) return null;
+
+    // Extract JSON from response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    console.error('❌ Claude parse error:', error.message);
+    return null;
+  }
+}
 
 const MESSAGES = {
   welcome: {
     en: `Hello! Welcome to Gluco Sahayak! 🙏
 
-I am your personal diabetes health assistant.
+I'm your diabetes assistant.
 
-First, select your language:
+Select language:
 1️⃣ English
 2️⃣ हिंदी (Hindi)
-3️⃣ ಕನ್ನಡ (Kannada)
+3️⃣ ಕನ್ನಡ (Kannada)`,
+    hi: `Hello! Gluco Sahayak में स्वागत! 🙏
 
-Just type 1, 2, or 3`,
-    hi: `Hello! Gluco Sahayak में आपका स्वागत है! 🙏
-
-मैं आपका diabetes assistant हूं।
+मैं diabetes assistant हूं।
 
 भाषा चुनें:
 1️⃣ English
 2️⃣ हिंदी (Hindi)
-3️⃣ ಕನ್ನಡ (Kannada)
-
-1, 2, या 3 टाइप करें`,
+3️⃣ ಕನ್ನಡ (Kannada)`,
     kn: `Hello! Gluco Sahayak ಗೆ ಸ್ವಾಗತ! 🙏
 
-ನಾನು ನಿಮ್ಮ diabetes assistant.
+ನಾನು diabetes assistant.
 
 ಭಾಷೆ ಆಯ್ಕೆ:
 1️⃣ English
 2️⃣ हिंदी (Hindi)
-3️⃣ ಕನ್ನಡ (Kannada)
-
-1, 2, ಅಥವಾ 3 ಟೈಪ್ ಮಾಡಿ`
+3️⃣ ಕನ್ನಡ (Kannada)`
   },
   
-  ask_name_age: {
-    en: `Great! I'll help you in English/Hindi mix. 😊
+  ask_basic: {
+    en: `Great! 😊 Tell me about yourself:
 
-Please tell me:
-• Your Name
-• Your Age
+Your name, age, gender (M/F), and emergency contact number
 
-Example: "My name is Ramesh Kumar, age 55"`,
-    hi: `बढ़िया! मैं English/Hindi mix में बात करूंगा। 😊
+Example: "Ramesh Kumar, 55, Male, 9876543210"`,
+    hi: `बढ़िया! 😊 अपने बारे में बताइए:
 
-बताइए:
-• आपका नाम (Name)
-• उम्र (Age)
+नाम, उम्र, gender (M/F), emergency number
 
-Example: "Mera naam Ramesh Kumar hai, umar 55"`,
-    kn: `ಚೆನ್ನಾಗಿದೆ! English/Kannada mix. 😊
+जैसे: "Ramesh Kumar, 55, Male, 9876543210"`,
+    kn: `ಚೆನ್ನಾಗಿದೆ! 😊 ನಿಮ್ಮ ಬಗ್ಗೆ:
 
-ದಯವಿಟ್ಟು ಹೇಳಿ:
-• ನಿಮ್ಮ ಹೆಸರು (Name)
-• ವಯಸ್ಸು (Age)
+ಹೆಸರು, ವಯಸ್ಸು, gender (M/F), emergency number
 
-Example: "My name is Ramesh, age 55"`
+"Ramesh, 55, Male, 9876543210"`
   },
   
-  ask_gender_emergency: {
-    en: `Nice to meet you, {name}! 🤝
+  ask_location: {
+    en: `Perfect! 📍 Now tell me:
 
-Please tell me:
-• Are you Male or Female?
-• Emergency contact number (family member)
+Your pincode and consent for diabetes care (yes/no)
 
-Example: "Male, emergency number 9876543210"`,
-    hi: `{name} ji, खुशी हुई! 🤝
+Example: "585104, yes"`,
+    hi: `Perfect! 📍 अब बताइए:
 
-बताइए:
-• आप Male हैं या Female?
-• Emergency contact number (परिवार)
+Pincode और consent (हां/no)
 
-Example: "Male, emergency number 9876543210"`,
-    kn: `{name}, ಸಂತೋಷ! 🤝
+जैसे: "585104, हां"`,
+    kn: `Perfect! 📍 ಈಗ:
 
-ದಯವಿಟ್ಟು:
-• ನೀವು Male/Female?
-• Emergency contact
+Pincode ಮತ್ತು consent (yes/no)
 
-Example: "Male, emergency 9876543210"`
+"585104, yes"`
   },
   
-  ask_pincode_consent: {
-    en: `Thank you! 📝
+  ask_diabetes: {
+    en: `Good! 🏥 About your diabetes:
 
-Last basic info:
-• Your area Pincode (6 digits)
-• Do you consent for diabetes management help? (Yes/No)
+Tell me everything in one message - type, how many years, what medicine you take, diet preference
 
-Example: "Pincode 585104, Yes I consent"`,
-    hi: `धन्यवाद! 📝
+Example: "Type 2, 10 years, taking Metformin, vegetarian"`,
+    hi: `अच्छा! 🏥 Diabetes के बारे में:
 
-आखिरी basic जानकारी:
-• Pincode (6 अंक)
-• Diabetes manage करने की permission? (हां/नहीं)
+सब कुछ बताइए - type, कितने साल, कौन सी medicine, diet
 
-Example: "Pincode 585104, haan consent"`,
-    kn: `ಧನ್ಯವಾದ! 📝
+जैसे: "Type 2, 10 saal, Metformin leta hoon, shakahari"`,
+    kn: `ಚೆನ್ನಾಗಿದೆ! 🏥 Diabetes ಬಗ್ಗೆ:
 
-ಕೊನೆಯ info:
-• Pincode (6 ಅಂಕಿ)
-• Diabetes manage permission? (Yes/No)
+ಎಲ್ಲವನ್ನೂ ಹೇಳಿ - type, ಎಷ್ಟು years, medicine, diet
 
-Example: "Pincode 585104, Yes"`
+"Type 2, 10 years, Metformin, vegetarian"`
   },
   
-  ask_diabetes_type: {
-    en: `Perfect! Now about your diabetes. 🏥
+  ask_health: {
+    en: `Almost done! 🎯
 
-What type do you have?
-1️⃣ Type 2 (most common, tablets)
-2️⃣ Type 1 (insulin from young age)
-3️⃣ Gestational (pregnancy)
-4️⃣ Don't know
+Any other health issues (BP, Cholesterol, etc.) and last HbA1c value?
 
-Type the number.`,
-    hi: `Perfect! अब diabetes के बारे में। 🏥
+Example: "BP and Cholesterol, HbA1c 8.5" or "No other issues, don't know HbA1c"`,
+    hi: `लगभग हो गया! 🎯
 
-कौन सा type है?
-1️⃣ Type 2 (common, tablets)
-2️⃣ Type 1 (insulin)
-3️⃣ Gestational (pregnancy)
-4️⃣ पता नहीं
+कोई और problem (BP, Cholesterol) और last HbA1c?
 
-Number टाइप करें।`,
-    kn: `ಸರಿ! ಈಗ diabetes ಬಗ್ಗೆ. 🏥
+जैसे: "BP aur Cholesterol, HbA1c 8.5" या "कोई नहीं, HbA1c पता नहीं"`,
+    kn: `ಬಹುತೇಕ! 🎯
 
-ಯಾವ type?
-1️⃣ Type 2 (tablets)
-2️⃣ Type 1 (insulin)
-3️⃣ Gestational
-4️⃣ ಗೊತ್ತಿಲ್ಲ
+ಇನ್ನೇನಾದರೂ (BP, Cholesterol) ಮತ್ತು last HbA1c?
 
-Number ಟೈಪ್.`
+"BP and Cholesterol, HbA1c 8.5"`
   },
   
-  ask_duration: {
-    en: `Got it. 📝
+  complete: {
+    en: `Perfect! ✅ All set!
 
-How many years have you had diabetes?
-
-Example: "10 years" or "Just diagnosed"`,
-    hi: `समझे। 📝
-
-कितने साल से diabetes?
-
-Example: "10 saal" या "Abhi naya"`,
-    kn: `ಅರ್ಥವಾಯಿತು. 📝
-
-ಎಷ್ಟು ವರ್ಷ diabetes?
-
-Example: "10 years"`
-  },
-  
-  ask_medication: {
-    en: `Important! 💊
-
-What medicine for diabetes?
-1️⃣ Only Tablets
-2️⃣ Only Insulin
-3️⃣ Both
-4️⃣ No medicine
-
-Type number.`,
-    hi: `Important! 💊
-
-Diabetes medicine?
-1️⃣ Tablets
-2️⃣ Insulin
-3️⃣ दोनों
-4️⃣ कोई नहीं
-
-Number टाइप करें।`,
-    kn: `ಮುಖ್ಯ! 💊
-
-Medicine?
-1️⃣ Tablets
-2️⃣ Insulin
-3️⃣ ಎರಡೂ
-4️⃣ ಇಲ್ಲ
-
-Number ಟೈಪ್.`
-  },
-  
-  ask_medicine_names: {
-    en: `Good! Please TYPE the medicine names.
-
-This is important for your safety!`,
-    hi: `अच्छा! Medicine names TYPE करें।
-
-Safety के लिए जरूरी!`,
-    kn: `ಚೆನ್ನಾಗಿದೆ! Medicine names TYPE ಮಾಡಿ।
-
-Safety ಗೆ ಮುಖ್ಯ!`
-  },
-  
-  ask_comorbidities: {
-    en: `Noted! ✅
-
-Any other health issues?
-• High BP
-• High Cholesterol
-• Heart problem
-• Kidney problem
-
-Example: "BP and Cholesterol" or "No, only diabetes"`,
-    hi: `ठीक! ✅
-
-और कोई problem?
-• High BP
-• Cholesterol
-• दिल
-• Kidney
-
-Example: "BP aur Cholesterol" या "Nahi"`,
-    kn: `ಸರಿ! ✅
-
-ಇನ್ನೇನಾದರೂ?
-• BP
-• Cholesterol
-• Heart
-• Kidney
-
-Example: "BP and Cholesterol"`
-  },
-  
-  ask_hba1c: {
-    en: `Thank you! 📊
-
-Last HbA1c value?
-(3-month sugar test)
-
-Example: "8.5" or "Don't remember"`,
-    hi: `धन्यवाद! 📊
-
-Last HbA1c?
-(3 महीने का test)
-
-Example: "8.5" या "याद नहीं"`,
-    kn: `ಧನ್ಯವಾದ! 📊
-
-Last HbA1c?
-(3 month test)
-
-Example: "8.5"`
-  },
-  
-  ask_diet: {
-    en: `Almost done! 🍽️
-
-What do you eat?
-1️⃣ Vegetarian
-2️⃣ Non-Vegetarian
-3️⃣ Eggetarian
-
-Type number.`,
-    hi: `लगभग हो गया! 🍽️
-
-क्या खाते हैं?
-1️⃣ Veg
-2️⃣ Non-Veg
-3️⃣ Egg
-
-Number टाइप करें।`,
-    kn: `ಬಹುತೇಕ ಮುಗಿಯಿತು! 🍽️
-
-ಏನು ತಿನ್ನುತ್ತೀರಿ?
-1️⃣ Veg
-2️⃣ Non-Veg
-3️⃣ Egg
-
-Number ಟೈಪ್.`
-  },
-  
-  onboarding_complete: {
-    en: `Perfect! ✅ Profile complete.
-
-I will help you with:
+I'll help you with:
 📊 Glucose monitoring
 💊 Medicine reminders
 🍽️ Diet advice
 🚨 Emergency alerts
 🎙️ Voice support
 
-What is your current sugar reading?
-(Or just say "Hi" to chat)`,
-    hi: `Perfect! ✅ Profile complete.
+What's your current sugar reading?`,
+    hi: `Perfect! ✅ सब तैयार!
 
 मैं मदद करूंगा:
 📊 Glucose monitoring
@@ -661,31 +546,24 @@ What is your current sugar reading?
 🚨 Emergency alert
 🎙️ Voice support
 
-Current sugar reading?
-(या "Hi" बोलें)`,
-    kn: `Perfect! ✅ Profile complete.
+Current sugar reading?`,
+    kn: `Perfect! ✅ ತಯಾರು!
 
-ನಾನು ಸಹಾಯ ಮಾಡುತ್ತೇನೆ:
+ನಾನು ಸಹಾಯ:
 📊 Glucose monitoring
 💊 Medicine reminder
 🍽️ Diet advice
 🚨 Emergency alert
 🎙️ Voice support
 
-Current sugar reading?
-("Hi" ಹೇಳಿ)`
+Current sugar reading?`
   }
 };
 
-// ========================================
-// ONBOARDING SYSTEM (FIXED)
-// ========================================
-
-async function handleOnboarding(phone, message, messageType = 'text', mediaData = null) {
+async function handleOnboarding(phone, message) {
   try {
     let state = await OnboardingState.findOne({ phone });
     
-    // CRITICAL FIX: New user gets welcome immediately
     if (!state) {
       state = await OnboardingState.create({
         phone,
@@ -704,180 +582,78 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
 
     switch (state.currentStep) {
       case 'language':
-        if (lower.includes('1') || lower.includes('english')) {
-          lang = 'en';
-        } else if (lower.includes('2') || lower.includes('hindi') || lower.includes('हिंदी')) {
-          lang = 'hi';
-        } else if (lower.includes('3') || lower.includes('kannada') || lower.includes('ಕನ್ನಡ')) {
-          lang = 'kn';
-        }
+        if (lower.includes('1') || lower.includes('english')) lang = 'en';
+        else if (lower.includes('2') || lower.includes('hindi') || lower.includes('हिंदी')) lang = 'hi';
+        else if (lower.includes('3') || lower.includes('kannada') || lower.includes('ಕನ್ನಡ')) lang = 'kn';
         
         state.data.set('language_pref', lang);
-        nextStep = 'name_age';
-        response = MESSAGES.ask_name_age[lang];
+        nextStep = 'basic_info';
+        response = MESSAGES.ask_basic[lang];
         break;
 
-      case 'name_age':
-        const nameAgeMatch = message.match(/(?:name|naam|ನಾನು|ಹೆಸರು)[\s:]*([a-zA-Z\s]+)[\s,]+(?:age|umar|ವಯಸ್ಸು|years?)[\s:]*(\d+)/i);
+      case 'basic_info':
+        // Use AI to parse
+        const basicParsed = await parseWithClaude(message, 'Looking for: name, age, gender, emergency contact');
         
-        if (nameAgeMatch) {
-          state.data.set('full_name', nameAgeMatch[1].trim());
-          state.data.set('age', parseInt(nameAgeMatch[2]));
+        if (basicParsed && basicParsed.name && basicParsed.age && basicParsed.gender && basicParsed.emergency_contact) {
+          state.data.set('full_name', basicParsed.name);
+          state.data.set('age', basicParsed.age);
+          state.data.set('gender', basicParsed.gender);
+          state.data.set('emergency_contact', basicParsed.emergency_contact);
           
-          nextStep = 'gender_emergency';
-          const name = nameAgeMatch[1].trim().split(' ')[0];
-          response = MESSAGES.ask_gender_emergency[lang].replace('{name}', name);
+          nextStep = 'location';
+          response = MESSAGES.ask_location[lang];
         } else {
-          response = "Please tell me: Name and Age\nExample: 'My name is Ramesh, age 55'";
+          response = lang === 'hi'
+            ? "कृपया बताइए: नाम, उम्र, gender, emergency number\nजैसे: 'Ramesh Kumar, 55, Male, 9876543210'"
+            : "Please tell me: name, age, gender, emergency number\nExample: 'Ramesh Kumar, 55, Male, 9876543210'";
         }
         break;
 
-      case 'gender_emergency':
-        let gender = null;
-        if (lower.includes('male') || lower.includes('पुरुष')) gender = 'Male';
-        if (lower.includes('female') || lower.includes('महिला')) gender = 'Female';
+      case 'location':
+        const locParsed = await parseWithClaude(message, 'Looking for: pincode (6 digits), consent (yes/no)');
         
-        const phoneMatch = message.match(/(\d{10})/);
-        
-        if (gender && phoneMatch) {
-          state.data.set('gender', gender);
-          state.data.set('emergency_contact', '+91' + phoneMatch[1]);
+        if (locParsed && locParsed.pincode && locParsed.consent !== null) {
+          state.data.set('pincode', locParsed.pincode);
+          state.data.set('consent_given', locParsed.consent);
           
-          nextStep = 'pincode_consent';
-          response = MESSAGES.ask_pincode_consent[lang];
+          nextStep = 'diabetes_info';
+          response = MESSAGES.ask_diabetes[lang];
         } else {
-          response = "Please: Gender (Male/Female) and Emergency contact (10 digits)";
+          response = lang === 'hi'
+            ? "Pincode और consent बताइए\nजैसे: '585104, हां'"
+            : "Please provide pincode and consent\nExample: '585104, yes'";
         }
         break;
 
-      case 'pincode_consent':
-        const pincodeMatch = message.match(/(\d{6})/);
-        const hasConsent = lower.includes('yes') || lower.includes('हां') || lower.includes('ha') || 
-                          lower.includes('consent') || lower.includes('ಹೌದು');
+      case 'diabetes_info':
+        const diabetesParsed = await parseWithClaude(message, 'Looking for: diabetes type, duration in years, medication type, medicine names, diet preference');
         
-        if (pincodeMatch && hasConsent) {
-          state.data.set('pincode', pincodeMatch[1]);
-          state.data.set('consent_given', true);
+        if (diabetesParsed && diabetesParsed.diabetes_type) {
+          state.data.set('diabetes_type', diabetesParsed.diabetes_type);
+          state.data.set('duration_years', diabetesParsed.duration_years || 0);
+          state.data.set('medication_type', diabetesParsed.medication_type || 'None');
+          state.data.set('current_meds', diabetesParsed.medicine_names || ['None']);
+          state.data.set('diet_preference', diabetesParsed.diet || 'Veg');
           
-          nextStep = 'diabetes_type';
-          response = MESSAGES.ask_diabetes_type[lang];
+          nextStep = 'health_info';
+          response = MESSAGES.ask_health[lang];
         } else {
-          response = "Please: Pincode (6 digits) and Yes/No for consent";
+          response = lang === 'hi'
+            ? "Diabetes type, कितने साल, medicine, diet बताइए\nजैसे: 'Type 2, 10 saal, Metformin, veg'"
+            : "Please tell: diabetes type, years, medicine, diet\nExample: 'Type 2, 10 years, Metformin, vegetarian'";
         }
         break;
 
-      case 'diabetes_type':
-        let diabetesType = 'Type 2';
+      case 'health_info':
+        const healthParsed = await parseWithClaude(message, 'Looking for: comorbidities (BP, Cholesterol, Heart, Kidney), HbA1c value');
         
-        if (lower.includes('1') || lower.includes('type 1')) {
-          diabetesType = 'Type 1';
-        } else if (lower.includes('2') || lower.includes('type 2')) {
-          diabetesType = 'Type 2';
-        } else if (lower.includes('3') || lower.includes('gestational')) {
-          diabetesType = 'Gestational';
-        }
-        
-        state.data.set('diabetes_type', diabetesType);
-        nextStep = 'duration';
-        response = MESSAGES.ask_duration[lang];
-        break;
-
-      case 'duration':
-        const yearMatch = message.match(/(\d+)/);
-        const duration = yearMatch ? parseInt(yearMatch[1]) : 0;
-        
-        state.data.set('duration_years', duration);
-        nextStep = 'medication';
-        response = MESSAGES.ask_medication[lang];
-        break;
-
-      case 'medication':
-        let medType = 'Tablets';
-        
-        if (lower.includes('1') || lower.includes('tablet')) {
-          medType = 'Tablets';
-        } else if (lower.includes('2') || lower.includes('insulin')) {
-          medType = 'Insulin';
-        } else if (lower.includes('3') || lower.includes('both')) {
-          medType = 'Both';
-        } else if (lower.includes('4') || lower.includes('no')) {
-          medType = 'None';
-        }
-        
-        state.data.set('medication_type', medType);
-        nextStep = 'medicine_names';
-        response = MESSAGES.ask_medicine_names[lang];
-        break;
-
-      case 'medicine_names':
-        const commonMeds = ['metformin', 'glimepiride', 'glyburide', 'insulin', 'glargine', 'lispro', 'sitagliptin', 'dapagliflozin'];
-        const foundMeds = [];
-        
-        commonMeds.forEach(med => {
-          if (lower.includes(med)) {
-            foundMeds.push(med.charAt(0).toUpperCase() + med.slice(1));
-          }
-        });
-        
-        if (foundMeds.length > 0 || lower.includes('no medicine') || lower.includes('कोई नहीं')) {
-          state.data.set('current_meds', foundMeds.length > 0 ? foundMeds : ['None']);
-          nextStep = 'comorbidities';
-          response = MESSAGES.ask_comorbidities[lang];
-        } else {
-          response = "Please tell me medicine names";
-        }
-        break;
-
-      case 'comorbidities':
-        const comorbidities = [];
-        
-        if (lower.includes('bp') || lower.includes('blood pressure') || lower.includes('hypertension')) {
-          comorbidities.push('Hypertension');
-        }
-        if (lower.includes('cholesterol')) {
-          comorbidities.push('High Cholesterol');
-        }
-        if (lower.includes('heart')) {
-          comorbidities.push('Heart Disease');
-        }
-        if (lower.includes('kidney')) {
-          comorbidities.push('Kidney Disease');
-        }
-        
-        state.data.set('comorbidities', comorbidities.length > 0 ? comorbidities : ['None']);
-        nextStep = 'hba1c';
-        response = MESSAGES.ask_hba1c[lang];
-        break;
-
-      case 'hba1c':
-        const hba1cMatch = message.match(/(\d+\.?\d*)/);
-        
-        if (hba1cMatch) {
-          state.data.set('last_hba1c', parseFloat(hba1cMatch[1]));
-        } else {
-          state.data.set('last_hba1c', null);
-        }
-        
-        nextStep = 'diet';
-        response = MESSAGES.ask_diet[lang];
-        break;
-
-      case 'diet':
-        let diet = 'Veg';
-        
-        if (lower.includes('1') || lower.includes('veg')) {
-          diet = 'Veg';
-        } else if (lower.includes('2') || lower.includes('non-veg')) {
-          diet = 'Non-Veg';
-        } else if (lower.includes('3') || lower.includes('egg')) {
-          diet = 'Eggetarian';
-        }
-        
-        state.data.set('diet_preference', diet);
+        state.data.set('comorbidities', healthParsed?.comorbidities || ['None']);
+        state.data.set('last_hba1c', healthParsed?.hba1c || null);
         
         await savePatientData(phone, state.data);
         nextStep = 'completed';
-        response = MESSAGES.onboarding_complete[lang];
+        response = MESSAGES.complete[lang];
         break;
     }
 
@@ -890,7 +666,7 @@ async function handleOnboarding(phone, message, messageType = 'text', mediaData 
   } catch (error) {
     console.error('❌ Onboarding error:', error);
     return { 
-      response: "Sorry, error. Type 'start' to begin again.",
+      response: "Sorry, error occurred. Type 'start' to begin again.",
       completed: false 
     };
   }
@@ -900,7 +676,7 @@ async function savePatientData(phone, dataMap) {
   try {
     const patientData = {
       phone,
-      language_pref: dataMap.get('language_pref'),
+      language_pref: dataMap.get('language_pref') || 'en',
       full_name: dataMap.get('full_name'),
       age: dataMap.get('age'),
       gender: dataMap.get('gender'),
@@ -908,10 +684,10 @@ async function savePatientData(phone, dataMap) {
       pincode: dataMap.get('pincode'),
       consent_given: dataMap.get('consent_given'),
       diabetes_type: dataMap.get('diabetes_type'),
-      duration_years: dataMap.get('duration_years'),
+      duration_years: dataMap.get('duration_years') || 0,
       medication_type: dataMap.get('medication_type'),
-      current_meds: dataMap.get('current_meds'),
-      comorbidities: dataMap.get('comorbidities'),
+      current_meds: dataMap.get('current_meds') || ['None'],
+      comorbidities: dataMap.get('comorbidities') || ['None'],
       last_hba1c: dataMap.get('last_hba1c'),
       diet_preference: dataMap.get('diet_preference'),
       onboarding_completed: true,
@@ -924,7 +700,6 @@ async function savePatientData(phone, dataMap) {
       { upsert: true, new: true }
     );
 
-    // DELETE onboarding state after completion
     await OnboardingState.findOneAndDelete({ phone });
 
     console.log(`✅ Patient saved: ${patientData.full_name}`);
@@ -944,7 +719,7 @@ async function checkOnboardingStatus(phone) {
 }
 
 // ========================================
-// PDF PROCESSING (RAG SYSTEM - FIXED)
+// PDF PROCESSING (RAG SYSTEM)
 // ========================================
 
 function extractKeywords(text) {
@@ -1153,7 +928,7 @@ async function createTriageRecord(phone, glucose, symptoms, aiAssessment, medica
 }
 
 // ========================================
-// CLAUDE AI (FIXED - ACTUALLY USES RAG!)
+// CLAUDE AI + RAG
 // ========================================
 
 async function initializeClaude() {
@@ -1214,12 +989,10 @@ function fallbackResponse(msg) {
   const num = msg.match(/(\d{2,3})/);
   const glucose = num ? parseInt(num[1]) : null;
   
-  // ONLY greet if user EXPLICITLY says just "hi" or "hello" - nothing else
   if (lower === 'hi' || lower === 'hello' || lower === 'hey') {
     return `Hello! 🏥 Gluco Sahayak\n\n📊 Send: "My sugar is 120"\n🍽️ Ask: "Diet advice"\n🎙️ Use voice messages`;
   }
   
-  // For glucose readings - NO GREETING, just direct feedback
   if (glucose && glucose >= 40 && glucose <= 500) {
     let r = `Reading: ${glucose} mg/dL\n\n`;
     
@@ -1235,7 +1008,6 @@ function fallbackResponse(msg) {
     return r;
   }
   
-  // For other questions - NO GREETING, just helpful response
   return `I can help with:\n📊 Glucose tracking\n🍽️ Diet advice\n💊 Medication guidance\n🎙️ Voice messages`;
 }
 
@@ -1246,7 +1018,6 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
   }
 
   try {
-    // CRITICAL: Actually retrieve medical knowledge!
     const medicalContext = ragSystemInitialized 
       ? await retrieveMedicalKnowledge(msg, 5)
       : [];
@@ -1256,7 +1027,6 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
     const readings = await GlucoseReading.find({ patientPhone: phone })
       .sort({ timestamp: -1 }).limit(10);
 
-    // Build references properly
     const references = medicalContext.length > 0
       ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 600)}`).join('\n\n')
       : 'No specific textbook reference found. Use general diabetes management protocols.';
@@ -1283,17 +1053,7 @@ CRITICAL RULES:
 5. Personalize for meds/comorbidities/diet
 6. Indian context (roti, dal, walk)
 7. Max 150 words
-8. NEVER EVER start with greetings - NO "Hello", NO "Hi", NO "Namaste", NO "Good morning" - START DIRECTLY WITH THE MEDICAL ADVICE
-
-WRONG (DO NOT DO THIS):
-"Hello! Your sugar is..."
-"Hi Rajesh! Let me help..."
-"Namaste! 180 is..."
-
-CORRECT (DO THIS):
-"Rajesh ji, 180 is elevated..."
-"Your reading of 120 is good..."
-"For Type 2 diabetes..."
+8. NEVER start with greetings - START DIRECTLY with medical advice
 
 MEDICAL TEXTBOOK EXCERPTS:
 ${references}
@@ -1302,7 +1062,7 @@ ${patientProfile}
 
 User: "${msg}"
 
-IMPORTANT: Start your response DIRECTLY with the patient's name and medical advice. NO GREETING WORDS AT ALL.`;
+START DIRECTLY with patient's name and medical advice. NO greetings.`;
 
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
@@ -1379,7 +1139,7 @@ async function checkCritical(reading, type, phone) {
 }
 
 // ========================================
-// WEBHOOK (FIXED - VOICE + ONBOARDING + RAG)
+// WEBHOOK
 // ========================================
 
 app.get('/webhook', (req, res) => {
@@ -1399,16 +1159,10 @@ app.post('/webhook', async (req, res) => {
     const from = msg.from;
     const messageType = msg.type;
     let text = '';
-    let mediaData = null;
     let isVoiceMessage = false;
 
-    // Handle message types
     if (messageType === 'text') {
       text = msg.text.body;
-      
-    } else if (messageType === 'image') {
-      text = msg.image.caption || '';
-      mediaData = { id: msg.image.id, mime_type: msg.image.mime_type };
       
     } else if (messageType === 'audio') {
       isVoiceMessage = true;
@@ -1455,16 +1209,16 @@ app.post('/webhook', async (req, res) => {
         return;
       }
       
-      const { response, completed } = await handleOnboarding(from, text, messageType, mediaData);
+      const { response, completed } = await handleOnboarding(from, text);
       await sendWhatsAppMessage(from, response);
       
       if (completed) {
-        console.log(`✅ ${from} onboarding complete`);
+        console.log(`✅ ${from} onboarding complete (AI-powered)`);
       }
       return;
     }
 
-    // Process with Claude + RAG + Patient Context
+    // Process with Claude + RAG
     const patient = onboardingStatus.patient;
     const reply = await analyzeWithClaudeRAG(from, text, patient);
 
@@ -1579,16 +1333,17 @@ app.get('/admin/health', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '5.0.0-FINAL',
+    version: '6.0.0-AI-POWERED',
     ai: isClaudeAvailable ? 'Claude Sonnet 4' : 'fallback',
-    rag: ragSystemInitialized ? `ready` : 'call /admin/process-pdfs',
+    rag: ragSystemInitialized ? 'ready' : 'call /admin/process-pdfs',
     voice: OPENAI_API_KEY ? 'enabled (FREE)' : 'disabled',
-    features: ['Onboarding', 'RAG', 'Voice', 'Multi-lang', 'Patient Context']
+    onboarding: 'AI-powered (smart parsing)',
+    features: ['AI Onboarding', 'RAG', 'Voice', 'Multi-lang', 'Triage']
   });
 });
 
 // ========================================
-// SCHEDULED REMINDERS (NO "NAMASTE")
+// SCHEDULED REMINDERS
 // ========================================
 
 cron.schedule('0 8 * * *', async () => {
@@ -1626,25 +1381,25 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v5.0 FINAL             ║
+║  GLUCO SAHAYAK v6.0 - AI POWERED      ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
-║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}                          ║
-║  RAG: ${ragSystemInitialized ? '✅' : '⚠️ '}                             ║
-║  Voice: ${OPENAI_API_KEY ? '✅ FREE' : '❌'}                      ║
+║  🤖 AI Parsing: ${isClaudeAvailable ? '✅' : '⚠️ '}                 ║
+║  📚 RAG: ${ragSystemInitialized ? '✅' : '⚠️ '}                       ║
+║  🎙️  Voice: ${OPENAI_API_KEY ? '✅' : '❌'}                      ║
 ╠════════════════════════════════════════╣
 ║  FEATURES:                            ║
-║    ✅ Onboarding (FIXED)              ║
-║    ✅ Voice (Whisper + gTTS)          ║
-║    ✅ RAG (Actually working!)         ║
-║    ✅ Patient Context                 ║
-║    ✅ Multi-language                  ║
-║    ✅ No "Namaste"                    ║
-║    ✅ No repeated greetings           ║
-║    ✅ Admin endpoints                 ║
+║    🧠 AI-powered onboarding           ║
+║    📝 Smart natural language parsing  ║
+║    🎯 5 questions only                ║
+║    🚀 Accepts ANY format              ║
+║    💊 Medical RAG system              ║
+║    🎙️  Voice support                  ║
+║    🌍 Multi-language                  ║
+║    🚨 Triage & alerts                 ║
 ╚════════════════════════════════════════╝
 
-🎉 PRODUCTION READY!
+🎉 PRODUCTION READY - AI EDITION!
 📝 Process PDFs: POST /admin/process-pdfs
 🔧 Reset user: POST /admin/reset-user
 📊 Status: GET /admin/health
