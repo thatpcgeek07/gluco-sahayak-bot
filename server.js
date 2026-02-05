@@ -1359,14 +1359,80 @@ async function analyzeWithClaudeRAG(phone, msg, patient) {
   }
 
   try {
+    // ========================================
+    // 🧠 RETRIEVE CONVERSATION HISTORY
+    // ========================================
+    let conversation = await Conversation.findOne({ patientPhone: phone });
+    
+    if (!conversation) {
+      conversation = await Conversation.create({
+        patientPhone: phone,
+        messages: [],
+        lastActive: new Date()
+      });
+    }
+    
+    // Get last 10 messages for context (5 exchanges)
+    const recentMessages = conversation.messages.slice(-10);
+    
+    console.log(`💬 Loading ${recentMessages.length} previous messages`);
+    
+    // ========================================
+    // 📚 RETRIEVE MEDICAL KNOWLEDGE
+    // ========================================
     const medicalContext = ragSystemInitialized 
       ? await retrieveMedicalKnowledge(msg, 5)
       : [];
     
     console.log(`📚 Retrieved ${medicalContext.length} medical references`);
     
-    const readings = await GlucoseReading.find({ patientPhone: phone })
-      .sort({ timestamp: -1 }).limit(10);
+    // ========================================
+    // 📊 TIME-AWARE GLUCOSE READINGS
+    // ========================================
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    const last7DaysStart = new Date(todayStart);
+    last7DaysStart.setDate(last7DaysStart.getDate() - 7);
+    
+    // Get readings by time period
+    const todayReadings = await GlucoseReading.find({
+      patientPhone: phone,
+      timestamp: { $gte: todayStart }
+    }).sort({ timestamp: -1 });
+    
+    const yesterdayReadings = await GlucoseReading.find({
+      patientPhone: phone,
+      timestamp: { $gte: yesterdayStart, $lt: todayStart }
+    }).sort({ timestamp: -1 });
+    
+    const last7DaysReadings = await GlucoseReading.find({
+      patientPhone: phone,
+      timestamp: { $gte: last7DaysStart }
+    }).sort({ timestamp: -1 });
+    
+    // Build time-aware summary
+    let glucoseSummary = '';
+    
+    if (todayReadings.length > 0) {
+      glucoseSummary += `TODAY: ${todayReadings.map(r => `${r.reading}mg/dL`).join(', ')}`;
+    } else {
+      glucoseSummary += 'TODAY: No readings yet';
+    }
+    
+    if (yesterdayReadings.length > 0) {
+      glucoseSummary += `\nYESTERDAY: ${yesterdayReadings.slice(0, 3).map(r => `${r.reading}mg/dL`).join(', ')}`;
+    }
+    
+    if (last7DaysReadings.length > 0) {
+      const avg7Days = Math.round(
+        last7DaysReadings.reduce((sum, r) => sum + r.reading, 0) / last7DaysReadings.length
+      );
+      glucoseSummary += `\nLAST 7 DAYS AVERAGE: ${avg7Days}mg/dL (${last7DaysReadings.length} readings)`;
+    }
+    
+    console.log(`📊 Glucose summary:\n${glucoseSummary}`);
 
     const references = medicalContext.length > 0
       ? medicalContext.map(doc => `[${doc.source}]\n${doc.content.substring(0, 600)}`).join('\n\n')
@@ -1381,35 +1447,82 @@ PATIENT PROFILE:
 - HbA1c: ${patient.last_hba1c || 'Unknown'}
 - Diet: ${patient.diet_preference}
 - Language: ${patient.language_pref}
-- Recent: ${readings.slice(0, 5).map(r => `${r.reading}mg/dL`).join(', ') || 'No data'}
+
+GLUCOSE READINGS (TIME-AWARE):
+${glucoseSummary}
 `;
 
     const system = `You are Gluco Sahayak, medical diabetes assistant.
 
-CRITICAL RULES:
-1. ALWAYS use medical textbook excerpts below
-2. ALWAYS cite source [Reference Name]
-3. Address patient by name
-4. Consider FULL patient profile
-5. Personalize for meds/comorbidities/diet
-6. Indian context (roti, dal, walk)
-7. Max 150 words
-8. NEVER start with greetings - START DIRECTLY with medical advice
+CRITICAL RULES FOR CONVERSATION MEMORY:
+1. 🧠 REMEMBER EVERYTHING from conversation history - this is MANDATORY
+2. 🚫 NEVER repeat recommendations already given
+3. 🔄 BUILD ON previous discussion - reference what patient told you
+4. ✅ If patient mentions equipment (pump, CGM) - ACKNOWLEDGE IT in all future responses
+5. ✅ If patient provides updates (weight change, new symptoms) - UPDATE your advice
+6. 🕐 DISTINGUISH between TODAY vs YESTERDAY vs LAST WEEK readings
+7. ⚠️ Don't alarm about old readings - focus on current status
+
+EXAMPLE - CORRECT BEHAVIOR:
+User: "I'm on insulin pump"
+Assistant: [acknowledges pump]
+User: "I gained weight"
+Assistant: "Given your insulin pump settings and weight gain..." ✅
+
+EXAMPLE - WRONG BEHAVIOR:
+User: "I'm on insulin pump"  
+Assistant: [acknowledges pump]
+User: "I gained weight"
+Assistant: "You need to start insulin therapy" ❌ WRONG - they already have pump!
+
+MEDICAL GUIDANCE:
+8. ALWAYS use medical textbook excerpts below
+9. ALWAYS cite source [Reference Name]
+10. Address patient by name
+11. Consider FULL patient profile AND conversation history
+12. Personalize for meds/comorbidities/diet
+13. Indian context (roti, dal, walk)
+14. Max 150 words
+15. NEVER start with greetings - START DIRECTLY with medical advice
 
 MEDICAL TEXTBOOK EXCERPTS:
 ${references}
 
 ${patientProfile}
 
-User: "${msg}"
+REMEMBER: You have access to the full conversation history. Use it to provide contextual, personalized advice that builds on what you already know about the patient.
 
 START DIRECTLY with patient's name and medical advice. NO greetings.`;
 
+    // ========================================
+    // 🔄 BUILD CONVERSATION HISTORY FOR CLAUDE
+    // ========================================
+    const conversationHistory = [];
+    
+    // Add previous messages from database
+    recentMessages.forEach(m => {
+      conversationHistory.push({
+        role: m.role,
+        content: m.content
+      });
+    });
+    
+    // Add current user message
+    conversationHistory.push({
+      role: 'user',
+      content: msg
+    });
+    
+    console.log(`📤 Sending ${conversationHistory.length} messages to Claude`);
+
+    // ========================================
+    // 🤖 CALL CLAUDE WITH FULL CONTEXT
+    // ========================================
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
       max_tokens: 600,
       system,
-      messages: [{ role: 'user', content: msg }]
+      messages: conversationHistory  // ✅ NOW INCLUDES HISTORY!
     }, {
       headers: {
         'x-api-key': ANTHROPIC_API_KEY,
@@ -1420,8 +1533,39 @@ START DIRECTLY with patient's name and medical advice. NO greetings.`;
     });
 
     const text = response.data?.content?.[0]?.text;
+    
     if (text) {
-      console.log(`✅ Claude + RAG (${medicalContext.length} refs)`);
+      console.log(`✅ Claude + RAG (${medicalContext.length} refs, ${recentMessages.length} history)`);
+      
+      // ========================================
+      // 💾 SAVE CONVERSATION TO DATABASE
+      // ========================================
+      conversation.messages.push({
+        role: 'user',
+        content: msg,
+        messageType: 'text',
+        timestamp: new Date()
+      });
+      
+      conversation.messages.push({
+        role: 'assistant',
+        content: text,
+        messageType: 'text',
+        timestamp: new Date()
+      });
+      
+      // ========================================
+      // 🧹 CLEANUP: Keep only last 20 messages
+      // ========================================
+      if (conversation.messages.length > 20) {
+        conversation.messages = conversation.messages.slice(-20);
+        console.log(`🧹 Trimmed conversation to last 20 messages`);
+      }
+      
+      conversation.lastActive = new Date();
+      await conversation.save();
+      
+      console.log(`💾 Conversation saved (${conversation.messages.length} total messages)`);
       
       await Patient.findOneAndUpdate(
         { phone },
@@ -1673,16 +1817,46 @@ app.get('/admin/health', async (req, res) => {
   }
 });
 
+app.get('/admin/conversation/:phone', async (req, res) => {
+  try {
+    const phone = req.params.phone.startsWith('+') ? req.params.phone : `+${req.params.phone}`;
+    const conversation = await Conversation.findOne({ patientPhone: phone });
+    
+    if (!conversation) {
+      return res.json({
+        phone,
+        exists: false,
+        message: 'No conversation history found'
+      });
+    }
+    
+    res.json({
+      phone,
+      exists: true,
+      totalMessages: conversation.messages.length,
+      lastActive: conversation.lastActive,
+      messages: conversation.messages.map(m => ({
+        role: m.role,
+        content: m.content.substring(0, 200) + (m.content.length > 200 ? '...' : ''),
+        timestamp: m.timestamp
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.0.0-RELIABLE',
+    version: '7.1.0-MEMORY',
     onboarding: 'Simple & Fast (NO AI)',
-    medical: 'Claude + RAG',
+    medical: 'Claude + RAG + Conversation Memory',
     voice: OPENAI_API_KEY ? 'enabled' : 'disabled',
     features: {
       onboarding: '✅ Reliable (no AI dependency)',
       medical_ai: '✅ Claude + RAG',
+      conversation_memory: '✅ Remembers context',
       voice: voiceEnabled ? '✅ Enabled' : '❌ Disabled',
       multilang: '✅ EN/HI/KN',
       triage: '✅ Automatic'
