@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const cron = require('node-cron');
@@ -22,7 +22,15 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHYSICIAN_PHONE = process.env.PHYSICIAN_PHONE;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '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';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Validate critical environment variables
+if (!WHATSAPP_TOKEN) console.error('❌ WHATSAPP_TOKEN not set');
+if (!WHATSAPP_PHONE_ID) console.error('❌ WHATSAPP_PHONE_ID not set');
+if (!VERIFY_TOKEN) console.error('❌ VERIFY_TOKEN not set');
+if (!MONGODB_URI) console.error('❌ MONGODB_URI not set');
+if (!ANTHROPIC_API_KEY) console.warn('⚠️  ANTHROPIC_API_KEY not set - using fallback responses');
+if (!OPENAI_API_KEY) console.warn('⚠️  OPENAI_API_KEY not set - voice features disabled');
 
 const MEDICAL_PDF_FILES = [
   { fileId: '1bG1owFgs9AfJRc3c8XGJDTGzshyVqfYM', filename: 'medical_textbook_1.pdf', source: 'Medical_Reference_1' },
@@ -35,7 +43,7 @@ const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 let isClaudeAvailable = false;
 let ragSystemInitialized = false;
-let voiceEnabled = true;
+let voiceEnabled = !!OPENAI_API_KEY;
 
 // ========================================
 // MONGODB SCHEMAS
@@ -134,10 +142,14 @@ const Conversation = mongoose.model('Conversation', conversationSchema);
 // DATABASE CONNECTION
 // ========================================
 
-mongoose.connect(MONGODB_URI).then(async () => {
-  console.log('✅ MongoDB connected');
-  await initializeRAGSystem();
-}).catch(err => console.error('❌ MongoDB:', err.message));
+if (MONGODB_URI) {
+  mongoose.connect(MONGODB_URI).then(async () => {
+    console.log('✅ MongoDB connected');
+    await initializeRAGSystem();
+  }).catch(err => console.error('❌ MongoDB:', err.message));
+} else {
+  console.error('❌ Cannot start - MONGODB_URI not set');
+}
 
 async function initializeRAGSystem() {
   try {
@@ -1290,7 +1302,7 @@ ${patientProfile}
 
 User: "${msg}"
 
-IMPORTANT: Start your response DIRECTLY with the patient's name and medical advice. NO GREETING WORDS AT ALL:`;
+IMPORTANT: Start your response DIRECTLY with the patient's name and medical advice. NO GREETING WORDS AT ALL.`;
 
     const response = await axios.post(CLAUDE_API_URL, {
       model: CLAUDE_MODEL,
@@ -1569,7 +1581,7 @@ app.get('/', (req, res) => {
     status: 'running',
     version: '5.0.0-FINAL',
     ai: isClaudeAvailable ? 'Claude Sonnet 4' : 'fallback',
-    rag: ragSystemInitialized ? `ready (${Math.floor(Math.random() * 1000) + 2000} chunks)` : 'call /admin/process-pdfs',
+    rag: ragSystemInitialized ? `ready` : 'call /admin/process-pdfs',
     voice: OPENAI_API_KEY ? 'enabled (FREE)' : 'disabled',
     features: ['Onboarding', 'RAG', 'Voice', 'Multi-lang', 'Patient Context']
   });
@@ -1616,6 +1628,7 @@ app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
 ║  GLUCO SAHAYAK v5.0 FINAL             ║
 ╠════════════════════════════════════════╣
+║  Port: ${PORT}                           ║
 ║  Claude: ${isClaudeAvailable ? '✅' : '⚠️ '}                          ║
 ║  RAG: ${ragSystemInitialized ? '✅' : '⚠️ '}                             ║
 ║  Voice: ${OPENAI_API_KEY ? '✅ FREE' : '❌'}                      ║
