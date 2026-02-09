@@ -1163,38 +1163,49 @@ async function handleOnboarding(phone, message) {
           // User chose EMERGENCY - skip setup
           console.log(`🚨 User ${phone} chose EMERGENCY mode`);
           
-          // Create minimal patient profile
-          const patient = await Patient.create({
-            phone,
-            language_pref: state.data.get('language_pref'),
-            full_name: 'Emergency User',
-            age: 30,
-            gender: 'Not Specified',
-            emergency_contact: '+919999999999',
-            pincode: '000000',
-            consent_given: true,
-            diabetes_type: 'Not Specified',
-            duration_years: 0,
-            medication_type: 'Not Specified',
-            current_meds: ['Not Specified'],
-            comorbidities: ['None'],
-            last_hba1c: null,
-            diet_preference: 'Not Specified',
-            onboarding_completed: true,
-            onboarding_step: 'emergency_skip',
-            registeredAt: new Date(),
-            lastActive: new Date()
-          });
-          
-          // Delete onboarding state
-          await OnboardingState.findOneAndDelete({ phone });
-          
-          console.log(`✅ Emergency profile created for ${phone}`);
-          
-          return {
-            response: MESSAGES.emergency_ready[lang],
-            completed: true
-          };
+          try {
+            // Create minimal patient profile (use findOneAndUpdate to avoid duplicates)
+            const patient = await Patient.findOneAndUpdate(
+              { phone },
+              {
+                phone,
+                language_pref: state.data.get('language_pref') || 'en',
+                full_name: 'Emergency User',
+                age: 30,
+                gender: 'Not Specified',
+                emergency_contact: '+919999999999',
+                pincode: '000000',
+                consent_given: true,
+                diabetes_type: 'Not Specified',
+                duration_years: 0,
+                medication_type: 'Not Specified',
+                current_meds: ['Not Specified'],
+                comorbidities: ['None'],
+                last_hba1c: null,
+                diet_preference: 'Not Specified',
+                onboarding_completed: true,
+                onboarding_step: 'emergency_skip',
+                registeredAt: new Date(),
+                lastActive: new Date()
+              },
+              { upsert: true, new: true }
+            );
+            
+            // Delete onboarding state
+            await OnboardingState.findOneAndDelete({ phone });
+            
+            console.log(`✅ Emergency profile created for ${phone}`);
+            
+            return {
+              response: MESSAGES.emergency_ready[lang],
+              completed: true
+            };
+          } catch (emergencyError) {
+            console.error(`❌ Emergency mode error:`, emergencyError);
+            // Fallback to normal onboarding
+            nextStep = 'name';
+            response = `Emergency mode failed. Let's do quick setup!\n\n` + MESSAGES.ask_name[lang];
+          }
         } else {
           response = MESSAGES.error_retry[lang] + '\n\n' + MESSAGES.choice[lang];
         }
@@ -2326,6 +2337,13 @@ app.post('/webhook', async (req, res) => {
         await Conversation.deleteMany({ patientPhone: from });
         await Triage.deleteMany({ patientPhone: from });
         
+        // Create fresh onboarding state so next message is processed correctly
+        await OnboardingState.create({
+          phone: from,
+          currentStep: 'language',
+          data: new Map()
+        });
+        
         console.log(`✅ User reset complete: ${from}`);
         
         // Send confirmation and start fresh
@@ -2336,7 +2354,7 @@ app.post('/webhook', async (req, res) => {
           MESSAGES.welcome.en
         );
         
-        return; // Exit here, onboarding will start with next message
+        return; // Exit here, onboarding will continue with next message
       } catch (error) {
         console.error(`❌ Reset error for ${from}:`, error.message);
         await sendWhatsAppMessage(from, 
@@ -2720,7 +2738,7 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.8 - SCRIPT MATCH!   ║
+║  GLUCO SAHAYAK v7.9 - BUG FIXES!      ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  Onboarding: SETUP or EMERGENCY       ║
@@ -2728,13 +2746,11 @@ app.listen(PORT, () => console.log(`
 ║  Voice: OpenAI TTS (Normal Speed)     ║
 ║  Language: Script-Aware Responses     ║
 ╠════════════════════════════════════════╣
-║  NEW IN v7.8:                         ║
-║    - Matches user's script exactly    ║
-║    - Hindi/Hinglish auto-detect       ║
-║    - Kannada/Kanglish auto-detect     ║
-║    - Voice: 1.0x speed (normal)       ║
-║    - Improved Kannada voice           ║
-║    - Text & voice match format        ║
+║  FIXED IN v7.9:                       ║
+║    - RESET no longer shows double msg ║
+║    - Emergency mode reliable now      ║
+║    - Better error handling            ║
+║    - Script matching working          ║
 ╚════════════════════════════════════════╝
 
 PRODUCTION READY!
@@ -2742,5 +2758,5 @@ Process PDFs: POST /admin/process-pdfs
 Reset user: POST /admin/reset-user
 Status: GET /admin/health
 
-Bot responds in EXACT same script as user's message!
+Bot responds in same script as user's message!
 `));
