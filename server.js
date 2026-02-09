@@ -2720,35 +2720,27 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.8 - SCRIPT MATCH! 📝║
+║  GLUCO SAHAYAK v7.8 - SCRIPT MATCH!   ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
-║  🚀 Onboarding: SETUP or EMERGENCY    ║
-║  🤖 Medical: Claude + RAG             ║
-║  🎙️  Voice: OpenAI TTS (Normal Speed) ║
-║  🌐 Language: Script-Aware Responses  ║
+║  Onboarding: SETUP or EMERGENCY       ║
+║  Medical: Claude + RAG                ║
+║  Voice: OpenAI TTS (Normal Speed)     ║
+║  Language: Script-Aware Responses     ║
 ╠════════════════════════════════════════╣
 ║  NEW IN v7.8:                         ║
-║    ✅ Matches user's script exactly   ║
-║       • Hindi (देवनागरी) → देवनागरी  ║
-║       • Hinglish (Roman) → Hinglish   ║
-║       • Kannada (ಕನ್ನಡ) → ಕನ್ನಡ        ║
-║       • Kanglish (Roman) → Kanglish   ║
-║    ✅ Voice: 1.0x speed (normal)      ║
-║    ✅ Improved Kannada voice (shimmer)║
-║    ✅ Text & voice both match format  ║
+║    - Matches user's script exactly    ║
+║    - Hindi/Hinglish auto-detect       ║
+║    - Kannada/Kanglish auto-detect     ║
+║    - Voice: 1.0x speed (normal)       ║
+║    - Improved Kannada voice           ║
+║    - Text & voice match format        ║
 ╚════════════════════════════════════════╝
 
-🎉 PRODUCTION READY!
-📝 Process PDFs: POST /admin/process-pdfs
-🔧 Reset user: POST /admin/reset-user
-📊 Status: GET /admin/health
+PRODUCTION READY!
+Process PDFs: POST /admin/process-pdfs
+Reset user: POST /admin/reset-user
+Status: GET /admin/health
 
-💡 Bot now responds in EXACT same script as user's message!
-   Devanagari → Devanagari, Roman → Roman 🎯
-`));
-   • Type "KANNADA" for Kanglish  
-   • Type "ENGLISH" for English
-   
-🎙️  Voice powered by Google Cloud TTS Wavenet (much more natural!)
+Bot responds in EXACT same script as user's message!
 `));
