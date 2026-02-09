@@ -1726,6 +1726,101 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
+// ========================================
+// 📤 TEMPLATE MESSAGE SENDING
+// ========================================
+// Use this to initiate conversations with new users
+// or send messages outside 24-hour window
+
+async function sendTemplateMessage(toPhone, templateName, languageCode = 'en', parameters = []) {
+  try {
+    console.log(`📤 Sending template "${templateName}" to ${toPhone}...`);
+    
+    const payload = {
+      messaging_product: 'whatsapp',
+      to: toPhone,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: {
+          code: languageCode // e.g., 'en', 'hi', 'en_US'
+        },
+        components: parameters.length > 0 ? [
+          {
+            type: 'body',
+            parameters: parameters.map(param => ({
+              type: 'text',
+              text: param
+            }))
+          }
+        ] : []
+      }
+    };
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
+      payload,
+      {
+        headers: {
+          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 10000
+      }
+    );
+
+    console.log(`✅ Template sent to ${toPhone}:`, response.data.messages?.[0]?.id);
+    return response.data;
+    
+  } catch (error) {
+    console.error('❌ Template send error:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+// Send template to multiple users (campaign)
+async function sendCampaignToMultipleUsers(userList, templateName, languageCode = 'en') {
+  const results = [];
+  
+  console.log(`🚀 Starting campaign: ${userList.length} users`);
+  
+  for (const user of userList) {
+    try {
+      // Prepare parameters if user has name
+      const parameters = user.name ? [user.name] : [];
+      
+      await sendTemplateMessage(
+        user.phone,
+        templateName,
+        languageCode,
+        parameters
+      );
+      
+      results.push({ 
+        phone: user.phone, 
+        success: true,
+        timestamp: new Date()
+      });
+      
+      // Rate limiting - 1 second between messages
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+    } catch (error) {
+      results.push({ 
+        phone: user.phone, 
+        success: false, 
+        error: error.message,
+        timestamp: new Date()
+      });
+    }
+  }
+  
+  const successCount = results.filter(r => r.success).length;
+  console.log(`✅ Campaign complete: ${successCount}/${userList.length} sent`);
+  
+  return results;
+}
+
 function fallbackResponse(msg) {
   const lower = msg.toLowerCase().trim();
   const num = msg.match(/(\d{2,3})/);
@@ -2628,6 +2723,90 @@ app.get('/admin/user-status/:phone', async (req, res) => {
   }
 });
 
+// ========================================
+// 📤 TEMPLATE MESSAGE ENDPOINTS
+// ========================================
+
+// Send template to single user
+app.post('/admin/send-template', async (req, res) => {
+  try {
+    const { phone, templateName, languageCode, parameters } = req.body;
+    
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number required' });
+    }
+    
+    const formattedPhone = phone.startsWith('+') ? phone : `+${phone}`;
+    const template = templateName || 'welcome_message'; // Default template
+    const language = languageCode || 'en';
+    const params = parameters || [];
+    
+    console.log(`📤 Admin sending template "${template}" to ${formattedPhone}`);
+    
+    const result = await sendTemplateMessage(
+      formattedPhone,
+      template,
+      language,
+      params
+    );
+    
+    res.json({
+      success: true,
+      message: 'Template sent successfully',
+      phone: formattedPhone,
+      template,
+      messageId: result.messages?.[0]?.id
+    });
+    
+  } catch (error) {
+    console.error('❌ Template send failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+// Send campaign to multiple users
+app.post('/admin/send-campaign', async (req, res) => {
+  try {
+    const { users, templateName, languageCode } = req.body;
+    
+    if (!users || !Array.isArray(users) || users.length === 0) {
+      return res.status(400).json({ error: 'Users array required' });
+    }
+    
+    const template = templateName || 'welcome_message';
+    const language = languageCode || 'en';
+    
+    console.log(`📤 Starting campaign: ${users.length} users, template: ${template}`);
+    
+    const results = await sendCampaignToMultipleUsers(users, template, language);
+    
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    
+    res.json({
+      success: true,
+      message: 'Campaign completed',
+      stats: {
+        total: users.length,
+        sent: successCount,
+        failed: failedCount
+      },
+      results
+    });
+    
+  } catch (error) {
+    console.error('❌ Campaign failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get('/admin/health', async (req, res) => {
   try {
     const totalPatients = await Patient.countDocuments();
@@ -2738,7 +2917,7 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.9 - BUG FIXES!      ║
+║  GLUCO SAHAYAK v7.10 - TEMPLATES!     ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  Onboarding: SETUP or EMERGENCY       ║
@@ -2746,17 +2925,19 @@ app.listen(PORT, () => console.log(`
 ║  Voice: OpenAI TTS (Normal Speed)     ║
 ║  Language: Script-Aware Responses     ║
 ╠════════════════════════════════════════╣
-║  FIXED IN v7.9:                       ║
-║    - RESET no longer shows double msg ║
-║    - Emergency mode reliable now      ║
-║    - Better error handling            ║
-║    - Script matching working          ║
+║  NEW IN v7.10:                        ║
+║    - Send WhatsApp templates          ║
+║    - Reach out to new users           ║
+║    - Campaign support (bulk send)     ║
+║    - Template API endpoints           ║
 ╚════════════════════════════════════════╝
 
 PRODUCTION READY!
 Process PDFs: POST /admin/process-pdfs
 Reset user: POST /admin/reset-user
+Send template: POST /admin/send-template
+Send campaign: POST /admin/send-campaign
 Status: GET /admin/health
 
-Bot responds in same script as user's message!
+Bot can now initiate conversations with templates!
 `));
