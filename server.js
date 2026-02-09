@@ -1746,6 +1746,7 @@ async function sendWhatsAppMessage(to, message) {
 async function sendTemplateMessage(toPhone, templateName, languageCode = 'en', parameters = []) {
   try {
     console.log(`📤 Sending template "${templateName}" to ${toPhone}...`);
+    console.log(`📋 Parameters:`, parameters.length > 0 ? parameters : 'None');
     
     const payload = {
       messaging_product: 'whatsapp',
@@ -1767,6 +1768,8 @@ async function sendTemplateMessage(toPhone, templateName, languageCode = 'en', p
         ] : []
       }
     };
+    
+    console.log(`📤 Payload:`, JSON.stringify(payload, null, 2));
 
     const response = await axios.post(
       `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
@@ -1785,6 +1788,7 @@ async function sendTemplateMessage(toPhone, templateName, languageCode = 'en', p
     
   } catch (error) {
     console.error('❌ Template send error:', error.response?.data || error.message);
+    console.error('❌ Full error:', JSON.stringify(error.response?.data, null, 2));
     throw error;
   }
 }
