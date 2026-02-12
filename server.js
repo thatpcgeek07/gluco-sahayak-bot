@@ -353,21 +353,32 @@ async function speakResponseOpenAI(text, language = 'en') {
     
     const voiceMap = {
       'en': 'alloy',      // Clear American English
-      'hi': 'nova',       // Works well for Hindi
-      'hi_pure': 'nova',  // Same for pure Hindi
+      'hi': 'alloy',      // ✅ CHANGED: 'alloy' is clearer for Hindi than 'nova'
+      'hi_pure': 'alloy', // Same for pure Hindi
       'kn': 'shimmer',    // Better for Kannada (clearer, more natural)
       'kn_pure': 'shimmer' // Same for pure Kannada
     };
     
     const voice = voiceMap[language] || 'alloy';
     
+    // ✅ Use slower speed for Hindi to improve clarity
+    const speedMap = {
+      'en': 1.0,
+      'hi': 0.85,     // Slower for Hindi clarity
+      'hi_pure': 0.85,
+      'kn': 0.9,      // Slightly slower for Kannada
+      'kn_pure': 0.9
+    };
+    
+    const speed = speedMap[language] || 1.0;
+    
     const response = await axios.post(
       'https://api.openai.com/v1/audio/speech',
       {
-        model: 'tts-1',
+        model: 'tts-1-hd',  // ✅ CHANGED: Use HD model for better quality
         voice: voice,
         input: text,
-        speed: 1.0  // Normal speed (not slow, not fast)
+        speed: speed  // ✅ CHANGED: Variable speed based on language
       },
       {
         headers: {
@@ -1143,6 +1154,7 @@ async function handleOnboarding(phone, message) {
         data: new Map()
       });
       
+      // ✅ ALWAYS start new users in ENGLISH - they choose language in step 1
       return { response: MESSAGES.welcome.en, completed: false };
     }
 
@@ -2456,7 +2468,7 @@ app.post('/webhook', async (req, res) => {
         
         console.log(`✅ User reset complete: ${from}`);
         
-        // Send confirmation and start fresh
+        // ✅ Send confirmation and start fresh in ENGLISH
         await sendWhatsAppMessage(from, 
           `✅ Account reset complete!\n\n` +
           `All your data has been deleted.\n\n` +
@@ -2536,7 +2548,7 @@ app.post('/webhook', async (req, res) => {
           `• Type "ENGLISH", "HINDI", or "KANNADA" to switch language`
         );
       } else {
-        // New user or incomplete onboarding - show welcome
+        // ✅ New user or incomplete onboarding - show welcome in ENGLISH
         await sendWhatsAppMessage(from, MESSAGES.welcome.en);
       }
       
@@ -2553,7 +2565,7 @@ app.post('/webhook', async (req, res) => {
       const existingPatient = await Patient.findOne({ phone: from });
       
       if (!existingPatient) {
-        // New user - start normal onboarding
+        // ✅ New user - start normal onboarding in ENGLISH
         await sendWhatsAppMessage(from, MESSAGES.welcome.en);
         return;
       }
@@ -2566,11 +2578,11 @@ app.post('/webhook', async (req, res) => {
         await Patient.findOneAndDelete({ phone: from });
         await OnboardingState.findOneAndDelete({ phone: from });
         
-        // Start fresh onboarding
+        // ✅ ALWAYS start fresh onboarding in ENGLISH
         await sendWhatsAppMessage(from,
           `✅ Let's complete your profile!\n\n` +
           `This will help me give you better personalized care. 🩺\n\n` +
-          MESSAGES.welcome[existingPatient.language_pref || 'en']
+          MESSAGES.welcome.en
         );
         
         return;
