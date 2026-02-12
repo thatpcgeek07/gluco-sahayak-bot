@@ -269,6 +269,19 @@ async function transcribeWhatsAppAudio(mediaId, language = 'en') {
 
 async function speakResponse(text, language = 'en') {
   try {
+    // ✅ USE gTTS (native voices) for Hindi and Kannada
+    // ✅ USE OpenAI TTS for English (better quality)
+    
+    console.log(`🎙️  TTS Request: language="${language}", text="${text.substring(0, 50)}..."`);
+    
+    if (language === 'hi' || language === 'hi_pure' || language === 'kn' || language === 'kn_pure') {
+      console.log(`✅ ROUTING TO gTTS for NATIVE ${language} voice`);
+      return await speakResponseGTTS(text, language);
+    }
+    
+    console.log(`✅ ROUTING TO Google Cloud TTS for ${language}`);
+    
+    // For English, try Google Cloud TTS first, then OpenAI
     console.log(`🗣️  Generating speech with Google Cloud TTS (${language})...`);
     
     // Google Cloud TTS has MUCH better Indian voices than OpenAI
@@ -411,12 +424,20 @@ async function speakResponseOpenAI(text, language = 'en') {
 }
 
 // Fallback gTTS function (if OpenAI TTS fails)
+// ✅ NOW PRIMARY for Hindi and Kannada - has NATIVE voices!
 async function speakResponseGTTS(text, language = 'en') {
   return new Promise((resolve, reject) => {
     try {
       console.log(`🗣️  Generating speech with gTTS (${language})...`);
       
-      const langMap = { 'en': 'en', 'hi': 'hi', 'kn': 'kn' };
+      // ✅ Map all language variants to base codes
+      const langMap = { 
+        'en': 'en', 
+        'hi': 'hi',
+        'hi_pure': 'hi',  // Map hi_pure to hi
+        'kn': 'kn',
+        'kn_pure': 'kn'   // Map kn_pure to kn
+      };
       const lang = langMap[language] || 'en';
       
       const gttsInstance = new gtts(text, lang);
@@ -437,7 +458,7 @@ async function speakResponseGTTS(text, language = 'en') {
           return;
         }
         
-        console.log(`✅ Speech generated (gTTS)`);
+        console.log(`✅ Speech generated (gTTS - Native ${lang} voice)`);
         resolve(filePath);
       });
     } catch (error) {
@@ -2482,6 +2503,71 @@ app.post('/webhook', async (req, res) => {
         await sendWhatsAppMessage(from, 
           `Sorry, reset failed. Please try again or contact support.`
         );
+        return;
+      }
+    }
+    
+    // ========================================
+    // 🎤 TTS TEST COMMANDS (Test different voice engines)
+    // ========================================
+    if (lowerText.startsWith('test voice') || lowerText.startsWith('test tts') || lowerText === 'test hindi voice') {
+      console.log(`🎤 TTS TEST command from ${from}`);
+      
+      const testText = "Namaste! Mera naam Gluco Sahayak hai. Main aapki madad karunga.";
+      
+      try {
+        await sendWhatsAppMessage(from, 
+          `🎤 Testing NATIVE Hindi voice (gTTS)...\n\n` +
+          `Text: "${testText}"\n\n` +
+          `Wait for audio...`
+        );
+        
+        const audioPath = await speakResponseGTTS(testText, 'hi');
+        const mediaId = await uploadAudioToWhatsApp(audioPath);
+        await sendVoiceMessage(from, mediaId);
+        
+        await sendWhatsAppMessage(from,
+          `✅ That was gTTS (Native Hindi speaker)\n\n` +
+          `Does it sound clear?\n\n` +
+          `Reply:\n` +
+          `• "test openai" - Try OpenAI (HD quality, accent)\n` +
+          `• "YES" - Keep this voice`
+        );
+        
+        return;
+      } catch (error) {
+        console.error('❌ TTS test error:', error.message);
+        await sendWhatsAppMessage(from, 
+          `❌ Test failed: ${error.message}`
+        );
+        return;
+      }
+    }
+    
+    if (lowerText.startsWith('test openai') || lowerText === 'test english voice') {
+      console.log(`🎤 OpenAI TTS TEST command from ${from}`);
+      
+      const testText = "Namaste! Mera naam Gluco Sahayak hai. Main aapki madad karunga.";
+      
+      try {
+        await sendWhatsAppMessage(from, 
+          `🎤 Testing OpenAI TTS...\n\n` +
+          `Wait for audio...`
+        );
+        
+        const audioPath = await speakResponseOpenAI(testText, 'hi');
+        const mediaId = await uploadAudioToWhatsApp(audioPath);
+        await sendVoiceMessage(from, mediaId);
+        
+        await sendWhatsAppMessage(from,
+          `✅ That was OpenAI TTS (HD quality, English accent)\n\n` +
+          `Reply "test voice" to try native Hindi again`
+        );
+        
+        return;
+      } catch (error) {
+        console.error('❌ OpenAI TTS test error:', error.message);
+        await sendWhatsAppMessage(from, `❌ Test failed: ${error.message}`);
         return;
       }
     }
