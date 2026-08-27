@@ -1727,8 +1727,8 @@ async function initializeClaude() {
       return true;
     }
   } catch (error) {
-    console.error('❌ Claude init failed');
-  }
+  console.error('❌ Claude init failed:', error.response?.data || error.message);
+}
   return false;
 }
 
