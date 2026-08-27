@@ -51,7 +51,7 @@ const MEDICAL_PDF_FILES = [
 ];
 
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = 'claude-sonnet-5';
 let isClaudeAvailable = false;
 let ragSystemInitialized = false;
 let voiceEnabled = !!OPENAI_API_KEY;
