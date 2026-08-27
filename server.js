@@ -1727,6 +1727,8 @@ async function initializeClaude() {
       console.log('✅ Claude ready:', CLAUDE_MODEL);
       return true;
     }
+    // ✅ FIXED: this branch was previously silent - log unexpected response shape
+    console.error('❌ Claude init: unexpected response shape:', JSON.stringify(response.data));
   } catch (error) {
     // ✅ FIXED: log the actual reason instead of a bare message
     console.error('❌ Claude init failed:', JSON.stringify(error.response?.data || error.message));
