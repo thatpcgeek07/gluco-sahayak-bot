@@ -51,6 +51,7 @@ const MEDICAL_PDF_FILES = [
 ];
 
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+// ✅ UPDATED: claude-sonnet-4-20250514 was retired. Using current model string.
 const CLAUDE_MODEL = 'claude-sonnet-5';
 let isClaudeAvailable = false;
 let ragSystemInitialized = false;
@@ -1723,12 +1724,13 @@ async function initializeClaude() {
     
     if (response.data?.content?.[0]?.text) {
       isClaudeAvailable = true;
-      console.log('✅ Claude Sonnet 4 ready');
+      console.log('✅ Claude ready:', CLAUDE_MODEL);
       return true;
     }
   } catch (error) {
-  console.error('❌ Claude init failed:', error.response?.data || error.message);
-}
+    // ✅ FIXED: log the actual reason instead of a bare message
+    console.error('❌ Claude init failed:', JSON.stringify(error.response?.data || error.message));
+  }
   return false;
 }
 
@@ -2236,7 +2238,8 @@ ${scriptPref !== 'en' ? 'RESPOND IN SAME FORMAT AS USER\'S MESSAGE!' : ''}`;
       return text;
     }
   } catch (e) {
-    console.error('❌ Claude error:', e.message);
+    // ✅ FIXED: log the actual API error, not just e.message
+    console.error('❌ Claude error:', JSON.stringify(e.response?.data || e.message));
   }
   
   console.log('⚠️  Using fallback');
@@ -2972,7 +2975,7 @@ app.get('/admin/conversation/:phone', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'running',
-    version: '7.4.0-LANGUAGE-FIX',
+    version: '7.10.1-MODEL-FIX',
     onboarding: 'Simple & Fast (NO AI)',
     medical: 'Claude + RAG + FORCED Language',
     voice: 'OpenAI TTS (High Quality)',
@@ -3030,7 +3033,7 @@ cron.schedule('0 20 * * *', async () => {
 
 app.listen(PORT, () => console.log(`
 ╔════════════════════════════════════════╗
-║  GLUCO SAHAYAK v7.10 - TEMPLATES!     ║
+║  GLUCO SAHAYAK v7.10.1 - MODEL FIX!   ║
 ╠════════════════════════════════════════╣
 ║  Port: ${PORT}                           ║
 ║  Onboarding: SETUP or EMERGENCY       ║
@@ -3038,11 +3041,9 @@ app.listen(PORT, () => console.log(`
 ║  Voice: OpenAI TTS (Normal Speed)     ║
 ║  Language: Script-Aware Responses     ║
 ╠════════════════════════════════════════╣
-║  NEW IN v7.10:                        ║
-║    - Send WhatsApp templates          ║
-║    - Reach out to new users           ║
-║    - Campaign support (bulk send)     ║
-║    - Template API endpoints           ║
+║  FIXED:                               ║
+║    - Claude model string updated      ║
+║    - Real error logging on init fail  ║
 ╚════════════════════════════════════════╝
 
 PRODUCTION READY!
