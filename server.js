@@ -1722,7 +1722,10 @@ async function initializeClaude() {
       timeout: 10000
     });
     
-    if (response.data?.content?.[0]?.text) {
+    // ✅ FIXED: with extended thinking on, content[0] can be a "thinking" block,
+    // not the reply. Find the actual text block regardless of position.
+    const textBlock = response.data?.content?.find(b => b.type === 'text');
+    if (textBlock?.text) {
       isClaudeAvailable = true;
       console.log('✅ Claude ready:', CLAUDE_MODEL);
       return true;
@@ -2194,7 +2197,9 @@ ${scriptPref !== 'en' ? 'RESPOND IN SAME FORMAT AS USER\'S MESSAGE!' : ''}`;
       timeout: 20000
     });
     
-    const text = response.data?.content?.[0]?.text;
+    // ✅ FIXED: content[0] can be a "thinking" block when extended thinking is on -
+    // find the text block by type instead of assuming position 0
+    const text = response.data?.content?.find(b => b.type === 'text')?.text;
     
     if (text) {
       console.log(`✅ Claude + RAG (${medicalContext.length} refs, ${recentMessages.length} history)`);
